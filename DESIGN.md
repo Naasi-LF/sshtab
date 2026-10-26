@@ -332,12 +332,14 @@ arc/
   driver.sh     服务器端驱动脚本（每次调用时编码后发送）
   protocol.py   生成驱动脚本的输入，解析返回的状态行
   output.py     格式化状态头和提示
-tests/          集成测试，直接连接 pdvm
+tests/
+  test_local.py   不需要服务器的测试：解析、协议、格式化
+  test_remote.py  集成测试，直接连接 pdvm（或 ARC_TEST_HOST 指定的主机）
+skills/arc/SKILL.md   给 Agent 的使用说明（Claude Code skill）
 DESIGN.md
-README.md
 ```
 
-预计总共三四百行代码。
+代码约 800 行（其中驱动脚本约 300 行），测试约 600 行。
 
 ---
 
