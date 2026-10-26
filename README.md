@@ -132,3 +132,7 @@ go test ./...              # plus end-to-end tests against a real server
 The end-to-end tests build the binary and run it against the SSH host `pdvm`, or the one named in `SSHTAB_TEST_HOST`; they are skipped if it is unreachable. They create and delete their own windows.
 
 To release, push a version tag (`git tag v0.1.0 && git push origin v0.1.0`). GitHub Actions then builds the four binaries with GoReleaser and publishes them on the Releases page, where `install.sh` finds them.
+
+## License
+
+[MIT](LICENSE)

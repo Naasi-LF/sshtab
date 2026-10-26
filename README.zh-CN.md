@@ -132,3 +132,7 @@ go test ./...              # 再加上连接真实服务器的端到端测试
 端到端测试会先编译出二进制文件，再连接名为 `pdvm` 的 SSH 主机，也可以用 `SSHTAB_TEST_HOST` 指定其他主机；连不上时这些测试会自动跳过。测试会自己创建并删除所用的窗口。
 
 发布新版本时，推送一个版本标签（`git tag v0.1.0 && git push origin v0.1.0`）。GitHub Actions 会用 GoReleaser 编译出四个平台的二进制文件，发布到 Releases 页面，`install.sh` 就是从那里下载的。
+
+## 许可证
+
+[MIT](LICENSE)
