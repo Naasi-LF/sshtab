@@ -3,17 +3,17 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "arc-remote"
+name = "sshtab"
 version = "0.1.0"
 description = "Remote shell for AI agents: stateful windows over SSH, nothing to install on the server"
-readme = "DESIGN.md"
+readme = "README.md"
 requires-python = ">=3.9"
 
 [project.scripts]
-arc = "arc.cli:main"
+sshtab = "sshtab.cli:main"
 
 [tool.setuptools]
-packages = ["arc"]
+packages = ["sshtab"]
 
 [tool.setuptools.package-data]
-arc = ["driver.sh"]
+sshtab = ["driver.sh"]

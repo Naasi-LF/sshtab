@@ -5,8 +5,8 @@ import unittest
 
 import argparse
 
-from arc import output, protocol
-from arc.cli import Target, parse_duration, parse_target
+from sshtab import output, protocol
+from sshtab.cli import Target, parse_duration, parse_target
 
 
 def b64(text: str) -> str:
@@ -16,7 +16,7 @@ def b64(text: str) -> str:
 def reply(out: bytes = b"", err: bytes = b"", code: int = 0, cwd: str = "/home/u",
           status: str = "exit", elapsed: int = 0, cmd: str = "",
           out_cut: str = "", err_cut: str = "") -> bytes:
-    head = (f"ARC1 status={status} code={code} cwd={b64(cwd)} elapsed={elapsed} "
+    head = (f"SSHTAB1 status={status} code={code} cwd={b64(cwd)} elapsed={elapsed} "
             f"cmd={b64(cmd)} signal= out_cut={out_cut} err_cut={err_cut} "
             f"out={len(out)} err={len(err)}\n")
     return head.encode() + out + err
@@ -66,7 +66,7 @@ class ProtocolTest(unittest.TestCase):
         self.assertEqual((result.status, result.elapsed, result.cmd), ("running", 31, "python train.py"))
 
     def test_output_that_looks_like_a_header_is_just_output(self):
-        fake = b"ARC1 status=exit code=0 cwd= out=0 err=0\n"
+        fake = b"SSHTAB1 status=exit code=0 cwd= out=0 err=0\n"
         result = protocol.parse(reply(out=fake))
         self.assertEqual(result.stdout, fake.decode())
         self.assertEqual(result.stderr, "")
@@ -79,7 +79,7 @@ class ProtocolTest(unittest.TestCase):
         self.assertEqual(protocol.parse(reply(b"\xff\n")).stdout, "�\n")
 
     def test_errors(self):
-        for raw in [b"", b"no header here\n", b"ARC1 status=exit\n", reply(b"abc")[:-1]]:
+        for raw in [b"", b"no header here\n", b"SSHTAB1 status=exit\n", reply(b"abc")[:-1]]:
             with self.subTest(raw=raw), self.assertRaises(protocol.ProtocolError):
                 protocol.parse(raw)
 
@@ -87,9 +87,9 @@ class ProtocolTest(unittest.TestCase):
         command = "echo \"it's\" $HOME"
         script = protocol.build_script("run", "train", cmd_b64=protocol.encode_command(command), wait=30)
         self.assertEqual(script.splitlines()[:4], [
-            "ARC_ACTION=run", "ARC_WINDOW=train", f"ARC_CMD_B64={b64(command)}", "ARC_WAIT=30",
+            "SSHTAB_ACTION=run", "SSHTAB_WINDOW=train", f"SSHTAB_CMD_B64={b64(command)}", "SSHTAB_WAIT=30",
         ])
-        self.assertIn("ARC1 status=", script)
+        self.assertIn("SSHTAB1 status=", script)
 
 
 class TruncationTest(unittest.TestCase):
@@ -115,8 +115,8 @@ class TruncationTest(unittest.TestCase):
     def test_hint_names_the_full_output_files(self):
         result = protocol.Result("exit", 0, "/", "a", "b", truncated=("stdout", "stderr"))
         self.assertIn(
-            "hint: output truncated. In full: ~/.arc/sessions/train/stdout and "
-            "~/.arc/sessions/train/stderr on the server",
+            "hint: output truncated. In full: ~/.sshtab/sessions/train/stdout and "
+            "~/.sshtab/sessions/train/stderr on the server",
             output.render(result, "pdvm/train"),
         )
 
@@ -147,7 +147,7 @@ class RenderTest(unittest.TestCase):
         self.assertEqual(
             output.render(result, "pdvm/train"),
             "[running 1m35s · pdvm/train · /data]\nepoch 1\n"
-            "hint: still running. `arc log pdvm/train` to check, `arc kill pdvm/train` to stop\n",
+            "hint: still running. `sshtab log pdvm/train` to check, `sshtab kill pdvm/train` to stop\n",
         )
 
     def test_windows_table(self):

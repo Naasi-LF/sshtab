@@ -1,10 +1,10 @@
-"""Wire format between arc and the remote driver (arc/driver.sh).
+"""Wire format between sshtab and the remote driver (sshtab/driver.sh).
 
-arc sends the driver on ssh's stdin, with its parameters prepended as shell
+sshtab sends the driver on ssh's stdin, with its parameters prepended as shell
 assignments; the user's command is base64 so it never needs quoting. The
 driver answers with one header line followed by raw stdout and stderr bytes:
 
-    ARC1 status=running code=0 cwd=<base64> elapsed=31 cmd=<base64> signal= out_cut= err_cut= out=<n bytes> err=<n bytes>\\n<stdout><stderr>
+    SSHTAB1 status=running code=0 cwd=<base64> elapsed=31 cmd=<base64> signal= out_cut= err_cut= out=<n bytes> err=<n bytes>\\n<stdout><stderr>
 
 status is a window state (exit, running, stopped, idle) or an action outcome
 (busy, closed, missing, list). The streams are delimited by their lengths,
@@ -21,7 +21,7 @@ import base64
 from dataclasses import dataclass
 from importlib import resources
 
-MAGIC = b"ARC1 "
+MAGIC = b"SSHTAB1 "
 
 
 class ProtocolError(Exception):
@@ -43,9 +43,9 @@ class Result:
 
 def build_script(action: str, window: str = "", **params: str | int) -> str:
     """Values are pasted into bash unquoted: only validated names, numbers and base64."""
-    lines = [f"ARC_ACTION={action}", f"ARC_WINDOW={window}"]
-    lines += [f"ARC_{key.upper()}={value}" for key, value in params.items()]
-    driver = resources.files("arc").joinpath("driver.sh").read_text()
+    lines = [f"SSHTAB_ACTION={action}", f"SSHTAB_WINDOW={window}"]
+    lines += [f"SSHTAB_{key.upper()}={value}" for key, value in params.items()]
+    driver = resources.files("sshtab").joinpath("driver.sh").read_text()
     return "\n".join(lines) + "\n" + driver
 
 

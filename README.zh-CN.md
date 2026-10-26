@@ -1,0 +1,132 @@
+# sshtab
+
+**给 AI Agent 用的远程 shell。** Agent（Claude Code、Codex 等）留在你自己的电脑上，通过 SSH 操作远程 Linux 服务器。在服务器上开的"终端标签页"会一直保留，不会每条命令执行完就关掉。服务器上不用安装任何东西，也不用跑任何模型。
+
+[English](README.md)
+
+```text
+$ sshtab run pdvm/train 'cd ~/sshtab-demo && source .venv/bin/activate'
+[exit 0 · pdvm/train · /home/parallels/sshtab-demo]
+
+$ sshtab run pdvm/train 'python train.py' --wait 3s
+[running 3s · pdvm/train · /home/parallels/sshtab-demo]
+training: lr=1.5 epochs=40
+epoch 1/40 loss=100
+epoch 2/40 loss=400
+epoch 3/40 loss=1600
+--- stderr ---
+epoch 4 [####      ]
+hint: still running. `sshtab log pdvm/train` to check, `sshtab kill pdvm/train` to stop
+
+$ sshtab kill pdvm/train
+[exit 130 · pdvm/train · /home/parallels/sshtab-demo]
+--- stderr ---
+epoch 4 [#####     ]Traceback (most recent call last):
+  File "/home/parallels/sshtab-demo/train.py", line 17, in <module>
+    time.sleep(0.1)
+KeyboardInterrupt
+stopped with SIGINT
+```
+
+loss 在发散，所以 Agent 按了 Ctrl-C。窗口仍然记得当前目录和已激活的 venv，所以下一条 `sshtab run pdvm/train 'python train.py'` 直接就能跑。
+
+## 为什么不直接用 `ssh host cmd`？
+
+| 用裸 ssh | 用 sshtab |
+|---|---|
+| 每条命令都是新的 shell，`cd` 和 `source .venv/bin/activate` 到下一条就失效了 | 每个窗口记住自己的目录、变量、函数和 venv |
+| 长命令会一直卡住 Agent，或者得自己折腾 `nohup`、`tmux` | 30 秒后先返回已有的输出，命令在窗口里继续跑 |
+| 翻页器、确认提示、`read` 会一直卡死 | stdin 接 `/dev/null`，翻页器全部关掉，没有东西能等待输入 |
+| 一次 `cat` 日志就可能撑爆 Agent 的上下文 | 超过 30KB 的输出在**服务器端**截断，只保留开头和结尾 |
+| 引号嵌套很容易写错 | 命令经过编码后传输，像在自己终端里一样只需要加一层引号 |
+| 每条命令都重新建立连接 | 复用同一个连接，每条命令约 0.1 秒 |
+
+## 安装
+
+本机需要 Python 3.9+ 和 OpenSSH，并且能用密钥登录一台装有 bash 的 Linux 服务器。
+
+```bash
+uv tool install git+https://github.com/Naasi-LF/sshtab
+```
+
+（也可以用 `pipx install git+https://github.com/Naasi-LF/sshtab`。）主机名就是你 `~/.ssh/config` 里的名字，跳板机、密钥、端口都照常生效。sshtab 永远不会要求输入密码。
+
+### 教会你的 Agent
+
+Claude Code 用户可以安装这个 skill。它会告诉 Agent 窗口怎么用、长命令怎么处理、输出上限是多少，以及怎么修改服务器上的文件：
+
+```bash
+mkdir -p ~/.claude/skills/sshtab && curl -fsSL https://raw.githubusercontent.com/Naasi-LF/sshtab/main/skills/sshtab/SKILL.md -o ~/.claude/skills/sshtab/SKILL.md
+```
+
+其他 Agent 也可以直接把这份 [skills/sshtab/SKILL.md](skills/sshtab/SKILL.md) 当作使用说明。
+
+## 命令
+
+```text
+sshtab run      host[/window] 'command' [--wait 30s]   在窗口里执行命令
+sshtab log      host[/window] [--tail N]               查看还没看过的输出
+sshtab kill     host[/window]                          Ctrl-C，然后 SIGTERM，再然后 SIGKILL
+sshtab sessions host                                   列出所有窗口
+sshtab close    host[/window] [--force]                删除窗口
+```
+
+只写 `host` 时，指的是窗口 `host/main`。第一次用到某个窗口名时，会自动新建这个窗口。
+
+### 窗口
+
+窗口就是服务器上的一个终端标签页。每个窗口都有自己的当前目录、shell 变量（不管有没有 export）、函数和 `unset` 记录，所以激活 venv、设置 `CUDA_VISIBLE_DEVICES` 这类操作做一次就一直有效。像用终端标签页一样，一个任务开一个窗口：比如 `gpu1/train` 用来训练，`gpu1/main` 用来随便看看。
+
+一个窗口同一时间只能跑一条命令。窗口正忙时会拒绝新命令，并提示你换一个窗口。
+
+### 状态头
+
+每次输出的第一行都会告诉你：发生了什么、在哪个窗口、在哪个目录。
+
+| 状态头 | 含义 | `run` / `log` 的退出码 |
+|---|---|---|
+| `[exit 2 · gpu1/main · /data]` | 已结束，退出码为 2 | 2 |
+| `[running 2m05s · gpu1/train · /data/proj]` | 还在窗口里跑 | 75 |
+| `[stopped · …]` | 没有留下退出码就消失了（SIGKILL） | 137 |
+
+sshtab 自己的错误（连接失败、窗口正忙、参数错误）返回 255，和 ssh 一致。
+
+### 长命令
+
+`sshtab run` 最多等 `--wait` 指定的时间（默认 30 秒，也可以写 `90`、`10m`、`2h`、`0`）。命令还没跑完时，你会先拿到目前为止的输出，命令继续在窗口里跑，ssh 断开了也不影响。之后用 `sshtab log` 只看新增的输出，Agent 可以一直轮询，直到退出码不再是 75。
+
+`sshtab kill` 会对整个进程组发送 Ctrl-C，所以 python 会收到 `KeyboardInterrupt`，训练脚本可以借机保存 checkpoint。如果这样停不下来，会依次升级为 SIGTERM 和 SIGKILL，每次间隔 5 秒。
+
+### 大量输出
+
+stdout 和 stderr 各自超过 30KB 时，只保留开头约 10KB 和结尾约 20KB，截断点在换行处，中间放一行省略标记：
+
+```text
+$ sshtab run gpu1 'seq 1 10000000'
+...
+2269
+... [75.2 MB omitted, 9,995,172 lines] ...
+9997442
+...
+```
+
+截断是在服务器上完成的，所以这 75MB 的输出只用半秒就返回了，实际只传回 31KB。完整输出会保存在服务器上的一个文件里，直到这个窗口运行下一条命令。用 `\r` 刷新的进度条（比如 tqdm）只显示最新的状态。
+
+## 限制
+
+- 只支持 Linux 服务器，需要 bash、coreutils 和 `flock`（util-linux）。已在 Ubuntu 24.04 + bash 5.2 上测试过。
+- 不支持交互式程序：不能用 `vim`、`top`，也不能输入密码。可以改用 `cat -n`、`top -bn1`、`sudo -n`。
+- 不会记住 alias，也不会记住 `set -e` 这类 shell 选项。
+- `conda activate` 还没有测试过。
+
+## 工作原理
+
+每次调用都通过共享的 ControlMaster 连接执行一次 `ssh host bash -s`，把一个小的 bash 驱动脚本从 stdin 发过去。驱动脚本把每个窗口的状态保存在服务器的 `~/.sshtab/sessions/<window>/` 里，在独立的进程组里启动命令，输出写入文件，最后返回一个按长度切分的状态头加输出内容。完整设计见 [DESIGN.md](DESIGN.md)。
+
+## 开发
+
+```bash
+python3 -m unittest discover -s tests
+```
+
+端到端测试会连接名为 `pdvm` 的 SSH 主机，也可以用 `SSHTAB_TEST_HOST` 指定其他主机；连不上时这些测试会自动跳过。测试会自己创建并删除所用的窗口。

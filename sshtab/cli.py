@@ -1,4 +1,4 @@
-"""Command-line entry point: parses `arc <action> <host[/window]> ...`."""
+"""Command-line entry point: parses `sshtab <action> <host[/window]> ...`."""
 
 from __future__ import annotations
 
@@ -7,13 +7,13 @@ import re
 import sys
 from dataclasses import dataclass
 
-from arc import output, protocol, ssh
+from sshtab import output, protocol, ssh
 
 DEFAULT_WINDOW = "main"
 WINDOW_RE = re.compile(r"[A-Za-z0-9_-]{1,32}")
 DURATION_RE = re.compile(r"(\d+)([smh]?)")
 
-# arc's own failures (bad arguments, connection errors, busy window) exit 255, like ssh.
+# sshtab's own failures (bad arguments, connection errors, busy window) exit 255, like ssh.
 EXIT_ARC_ERROR = 255
 # The command is still running: "try again later" (sysexits EX_TEMPFAIL).
 EXIT_RUNNING = 75
@@ -62,11 +62,11 @@ def non_negative_int(text: str) -> int:
 class _Parser(argparse.ArgumentParser):
     def error(self, message: str) -> None:
         self.print_usage(sys.stderr)
-        self.exit(EXIT_ARC_ERROR, f"arc: error: {message}\n")
+        self.exit(EXIT_ARC_ERROR, f"sshtab: error: {message}\n")
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = _Parser(prog="arc", description="Remote shell for AI agents.")
+    parser = _Parser(prog="sshtab", description="Remote shell for AI agents.")
     actions = parser.add_subparsers(dest="action", required=True, parser_class=_Parser)
 
     run = actions.add_parser("run", help="run a command in a window")
@@ -104,7 +104,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         target = parse_target(args.target)
         if args.action == "sessions" and "/" in args.target:
-            raise ValueError(f"sessions takes a host, not a window: try `arc sessions {target.host}`")
+            raise ValueError(f"sessions takes a host, not a window: try `sshtab sessions {target.host}`")
     except ValueError as exc:
         return _fail(str(exc))
     if args.action == "run":
@@ -131,8 +131,8 @@ def cmd_run(target: Target, command: str, wait: int) -> int:
         other = "main" if target.window != DEFAULT_WINDOW else "main2"
         return _fail(
             f"{_busy(target, result)}\n"
-            f"hint: use another window, e.g. `arc run {target.host}/{other} '...'`, "
-            f"or `arc kill {target}` to stop it"
+            f"hint: use another window, e.g. `sshtab run {target.host}/{other} '...'`, "
+            f"or `sshtab kill {target}` to stop it"
         )
     sys.stdout.write(output.render(result, str(target)))
     return _exit_code(result)
@@ -177,7 +177,7 @@ def cmd_close(target: Target, force: bool) -> int:
         return EXIT_ARC_ERROR
     if result.status == "busy":
         hint = "" if force else (
-            f"\nhint: `arc kill {target}` first, or `arc close {target} --force`"
+            f"\nhint: `sshtab kill {target}` first, or `sshtab close {target} --force`"
         )
         return _fail(_busy(target, result) + hint)
     if result.status == "missing":

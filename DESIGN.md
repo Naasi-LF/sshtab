@@ -1,6 +1,6 @@
-# arc 设计文档（v0.1）
+# sshtab 设计文档（v0.1）
 
-> `arc` 是暂定名，和 Phabricator 的 `arc` 重名，发布前需要改。
+> sshtab = ssh + 终端标签页（tab）。
 
 ## 1. 目标
 
@@ -12,7 +12,7 @@
 
 ### 为什么不直接用 `ssh host cmd`
 
-| 裸 ssh 的问题 | arc 的做法 |
+| 裸 ssh 的问题 | sshtab 的做法 |
 |---|---|
 | 每条命令都是新 shell，`cd`、`source venv` 下一条就失效 | 窗口记住目录和环境变量 |
 | 长命令要么一直卡住，要么得自己折腾 `nohup` | 30 秒没跑完就先返回，命令在窗口里继续跑 |
@@ -29,7 +29,7 @@
 
 ## 2. 核心概念：窗口
 
-**窗口 = 服务器上的一个终端标签页。** 这是 arc 唯一的概念。
+**窗口 = 服务器上的一个终端标签页。** 这是 sshtab 唯一的概念。
 
 - 每个窗口有自己的**当前目录**和**环境变量**
 - 窗口写成 `主机/窗口名`，例如 `pdvm/train`；只写 `pdvm` 等于 `pdvm/main`
@@ -58,14 +58,14 @@
 ## 3. 命令
 
 ```text
-arc run      <主机[/窗口]> '<命令>' [--wait 30s]   # 在窗口里执行
-arc log      <主机[/窗口]> [--tail N]              # 看窗口的输出
-arc kill     <主机[/窗口]>                         # 相当于按 Ctrl-C
-arc sessions <主机>                                # 列出所有窗口
-arc close    <主机[/窗口]> [--force]               # 关闭窗口
+sshtab run      <主机[/窗口]> '<命令>' [--wait 30s]   # 在窗口里执行
+sshtab log      <主机[/窗口]> [--tail N]              # 看窗口的输出
+sshtab kill     <主机[/窗口]>                         # 相当于按 Ctrl-C
+sshtab sessions <主机>                                # 列出所有窗口
+sshtab close    <主机[/窗口]> [--force]               # 关闭窗口
 ```
 
-### 3.1 `arc run`
+### 3.1 `sshtab run`
 
 在窗口里执行命令，最多等 `--wait`（默认 30 秒）：
 
@@ -74,55 +74,55 @@ arc close    <主机[/窗口]> [--force]               # 关闭窗口
 - **窗口正忙**：直接报错，不执行
 
 ```text
-$ arc run pdvm/train 'cd /data/proj && source .venv/bin/activate'
+$ sshtab run pdvm/train 'cd /data/proj && source .venv/bin/activate'
 [exit 0 · pdvm/train · /data/proj]
 
-$ arc run pdvm/train 'python train.py'
+$ sshtab run pdvm/train 'python train.py'
 [running 30s · pdvm/train · /data/proj]
 epoch 1/10 step 20 loss=2.71
-hint: still running. `arc log pdvm/train` to check, `arc kill pdvm/train` to stop
+hint: still running. `sshtab log pdvm/train` to check, `sshtab kill pdvm/train` to stop
 
-$ arc run pdvm/train 'ls'
+$ sshtab run pdvm/train 'ls'
 error: pdvm/train is busy (python train.py, 12m)
-hint: use another window, e.g. `arc run pdvm/main 'ls'`
+hint: use another window, e.g. `sshtab run pdvm/main 'ls'`
 ```
 
 命令字符串当作 bash 脚本执行，所以 `&&`、管道、多行脚本都可以用。多行命令可以通过 stdin 传入：
 
 ```text
-$ arc run pdvm/train - <<'EOF'
+$ sshtab run pdvm/train - <<'EOF'
 for f in cfg/*.yaml; do echo "$f"; done
 EOF
 ```
 
-### 3.2 `arc log`
+### 3.2 `sshtab log`
 
 显示窗口里**上次查看之后新增的**输出，并带上当前状态。反复调用时不会读到重复内容。
 
 ```text
-$ arc log pdvm/train
+$ sshtab log pdvm/train
 [running 12m · pdvm/train · /data/proj]
 epoch 3/10 step 900 loss=1.84
 
-$ arc log pdvm/train            # 之后没有新输出
+$ sshtab log pdvm/train            # 之后没有新输出
 [running 12m · pdvm/train · /data/proj]
 (no new output)
 
-$ arc log pdvm/train --tail 100  # 不管看过没有，显示最后 100 行
+$ sshtab log pdvm/train --tail 100  # 不管看过没有，显示最后 100 行
 ```
 
 命令跑完后，`log` 会显示它的退出码和剩下的输出，窗口随之恢复空闲。`run` 自己返回的输出也算"看过"，之后的 `log` 不会重复显示。
 
 对一个从没用过的窗口 `log`，会显示 `idle` 和 `(no new output)`，但不会因此新建这个窗口。
 
-`log` 的退出码规则和 `run` 一样（见第 4 节），所以 Agent 可以反复调用 `arc log`，直到退出码不再是 75。
+`log` 的退出码规则和 `run` 一样（见第 4 节），所以 Agent 可以反复调用 `sshtab log`，直到退出码不再是 75。
 
-### 3.3 `arc kill`
+### 3.3 `sshtab kill`
 
 相当于在那个窗口里按 Ctrl-C。依次发送：SIGINT，等 5 秒；SIGTERM，等 5 秒；SIGKILL。信号发给整个进程组，命令启动的子进程也会一起停掉。一旦进程组里的进程全部退出，就不再发送后面的信号。
 
 ```text
-$ arc kill pdvm/train
+$ sshtab kill pdvm/train
 [exit 130 · pdvm/train · /data/proj]
 saving checkpoint...
 --- stderr ---
@@ -139,10 +139,10 @@ stopped with SIGINT
 - 窗口里没有在跑的命令时，显示 `(nothing was running)`。
 - 只要窗口最终停下来了，`kill` 的退出码就是 0，命令自己的退出码看状态头。
 
-### 3.4 `arc sessions`
+### 3.4 `sshtab sessions`
 
 ```text
-$ arc sessions pdvm
+$ sshtab sessions pdvm
 WINDOW  STATUS          DIR              COMMAND
 main    exit 0          /home/parallels  ls
 train   running 12m05s  /data/proj       python train.py
@@ -151,7 +151,7 @@ logs    exit 0          /var/log         tail -n 100 syslog
 
 状态和状态头里的写法一样，COMMAND 是正在跑或最后一次跑的命令的第一行。中文路径按终端里的显示宽度对齐。
 
-### 3.5 `arc close`
+### 3.5 `sshtab close`
 
 删除窗口及其状态，再用同一个名字就会得到一个全新的窗口。窗口正忙时会拒绝，并提示先 `kill` 或者加 `--force`；加 `--force` 会先 `kill` 再关闭。关闭一个不存在的窗口不算错误，会提示 `does not exist`，退出码为 0。
 
@@ -185,7 +185,7 @@ hint: ...              ← 只在需要提示下一步时出现
 **截断**：stdout 和 stderr 分别超过 30KB 时，保留开头约 10KB 和结尾约 20KB，中间替换成一行省略标记，最后附一条提示：
 
 ```text
-$ arc run pdvm 'seq 1 10000000'
+$ sshtab run pdvm 'seq 1 10000000'
 [exit 0 · pdvm/main · /home/parallels]
 1
 2
@@ -195,7 +195,7 @@ $ arc run pdvm 'seq 1 10000000'
 9997442
 ...
 10000000
-hint: output truncated. In full: ~/.arc/sessions/main/stdout on the server, until this window runs another command
+hint: output truncated. In full: ~/.sshtab/sessions/main/stdout on the server, until this window runs another command
 ```
 
 - 截断在**服务器端**完成，大量输出不会经过网络传回来：上面 75MB 的输出 0.5 秒就返回了，只传回 31KB。
@@ -204,7 +204,7 @@ hint: output truncated. In full: ~/.arc/sessions/main/stdout on the server, unti
 - 完整输出一直保存在服务器上的窗口文件里，直到这个窗口运行下一条命令为止。需要看中间部分时，Agent 可以在**另一个窗口**里用 `sed -n` 读取。之所以要换窗口，是因为在同一个窗口里运行命令，会把这个文件覆盖掉。
 - `run`、`log`、`kill` 和 `log --tail` 的输出都会按这个规则截断；`log` 每次只截断新增的那一段。
 
-### `arc` 自己的退出码
+### `sshtab` 自己的退出码
 
 | 退出码 | 含义 |
 |---|---|
@@ -212,7 +212,7 @@ hint: output truncated. In full: ~/.arc/sessions/main/stdout on the server, unti
 | 75 | 命令还在跑（EX_TEMPFAIL，"稍后再查"） |
 | 137 | 命令没有留下退出码就消失了（`stopped`，按 SIGKILL 的惯例） |
 | 0 | `log` 一个空闲窗口；`kill`、`sessions`、`close` 成功 |
-| 255 | arc 自身的错误：连接失败、窗口正忙、参数错误等（和 ssh 一致） |
+| 255 | sshtab 自身的错误：连接失败、窗口正忙、参数错误等（和 ssh 一致） |
 
 ---
 
@@ -223,36 +223,36 @@ hint: output truncated. In full: ~/.arc/sessions/main/stdout on the server, unti
 ```text
    本地                                  服务器
  ┌──────────┐   系统 ssh（连接复用）   ┌──────────────────────────┐
- │ arc      │ ───────────────────────▶ │ 驱动脚本 (bash)           │
+ │ sshtab      │ ───────────────────────▶ │ 驱动脚本 (bash)           │
  │ (Python) │                          │  ├ 检查 / 加锁            │
  │          │ ◀─────────────────────── │  ├ 启动命令（独立进程组） │
  │ 格式化    │   状态行 + 截断后的输出  │  ├ 等待最多 --wait        │
  └──────────┘                          │  └ 读输出、截断、返回      │
-                                       │ ~/.arc/sessions/<窗口>/   │
+                                       │ ~/.sshtab/sessions/<窗口>/   │
                                        └──────────────────────────┘
 ```
 
-- **不常驻**：每次调用 `arc` 都只是执行一次 ssh，执行完就退出。本地不保存任何状态。
-- **所有状态都在服务器的 `~/.arc/` 里**：本地机器换了也不影响，ssh 断开也不影响。
+- **不常驻**：每次调用 `sshtab` 都只是执行一次 ssh，执行完就退出。本地不保存任何状态。
+- **所有状态都在服务器的 `~/.sshtab/` 里**：本地机器换了也不影响，ssh 断开也不影响。
 
 ### 5.2 SSH 连接
 
-调用系统的 `ssh`，由 arc 自动加上这些参数：
+调用系统的 `ssh`，由 sshtab 自动加上这些参数：
 
 ```text
 -o ControlMaster=auto
--o ControlPath=~/.arc/cm/%C
+-o ControlPath=~/.sshtab/cm/%C
 -o ControlPersist=10m
 -o BatchMode=yes             # 绝不弹出密码提示，避免卡住
 -o ServerAliveInterval=15
 ```
 
-只支持密钥登录，arc 永远不接触密码。
+只支持密钥登录，sshtab 永远不接触密码。
 
 ### 5.3 服务器上的文件
 
 ```text
-~/.arc/sessions/<窗口>/
+~/.sshtab/sessions/<窗口>/
   cwd          当前目录
   vars.sh      所有 shell 变量（逐个 `declare -p` 的输出，可以直接 source）
   funcs.sh     所有 shell 函数（`declare -f` 的输出）
@@ -287,10 +287,10 @@ hint: output truncated. In full: ~/.arc/sessions/main/stdout on the server, unti
    ```
    - 用 `trap EXIT` 来保存状态，这样即使用户命令里写了 `exit 3`，状态也会保存。写入退出码的步骤也放在这里。
    - 窗口一旦有了保存的状态，就用 `env -i` 从空环境启动、完全靠 `vars.sh` 恢复，这样被 `unset` 的变量不会因为 ssh 登录环境里有它而又冒出来。新窗口则继承 ssh 的登录环境。
-   - arc 自己用到的变量都以 `__arc_` 开头，保存时跳过；bash 内部的变量（`PPID`、`RANDOM`、`SHLVL` 等）和每次连接都会变的 `SSH_*` 也跳过。
+   - sshtab 自己用到的变量都以 `__sshtab_` 开头，保存时跳过；bash 内部的变量（`PPID`、`RANDOM`、`SHLVL` 等）和每次连接都会变的 `SSH_*` 也跳过。
    - 用户命令写在临时文件里传给窗口的 shell，而不是放在环境变量里，因为单个环境变量同样有约 128KB 的长度限制。
 5. **解锁**，然后**等待**：每 20 毫秒检查一次是否已经有 `exit` 文件、进程是否还活着，最多等 `--wait` 秒。等待用的是对一个没人写入的 fifo 做 `read -t 0.02`，这是 bash 的内置命令，不需要 fork，所以短命令几乎没有额外延迟。
-6. **返回结果**：第一行输出一个机器可读的状态行，本地 arc 解析后再格式化成状态头；接着输出截断后的 stdout 和 stderr，并更新 `offset`。截断时驱动脚本只按字节切出开头和结尾两段，并统计中间部分的换行数；把截断点挪到换行处、生成省略标记，是本地 arc 做的事。
+6. **返回结果**：第一行输出一个机器可读的状态行，本地 sshtab 解析后再格式化成状态头；接着输出截断后的 stdout 和 stderr，并更新 `offset`。截断时驱动脚本只按字节切出开头和结尾两段，并统计中间部分的换行数；把截断点挪到换行处、生成省略标记，是本地 sshtab 做的事。
 
 因为命令的输出写在文件里、stdin 是 `/dev/null`，它不占用 ssh 连接的任何东西，所以**等待期间 ssh 断开或者本地按了 Ctrl-C，都不会影响命令本身**。
 
@@ -326,7 +326,7 @@ PYTHONUNBUFFERED=1      # 否则 python 的输出会被缓冲，log 里长时间
 只用 Python 标准库，没有第三方依赖，要求 Python ≥ 3.9。
 
 ```text
-arc/
+sshtab/
   cli.py        命令行解析，把 主机/窗口 拆开
   ssh.py        调用 ssh，加上连接复用参数
   driver.sh     服务器端驱动脚本（每次调用时编码后发送）
@@ -334,8 +334,8 @@ arc/
   output.py     格式化状态头和提示
 tests/
   test_local.py   不需要服务器的测试：解析、协议、格式化
-  test_remote.py  集成测试，直接连接 pdvm（或 ARC_TEST_HOST 指定的主机）
-skills/arc/SKILL.md   给 Agent 的使用说明（Claude Code skill）
+  test_remote.py  集成测试，直接连接 pdvm（或 SSHTAB_TEST_HOST 指定的主机）
+skills/sshtab/SKILL.md   给 Agent 的使用说明（Claude Code skill）
 DESIGN.md
 ```
 
@@ -349,9 +349,9 @@ DESIGN.md
 
 | 步骤 | 内容 | 完成标准 |
 |---|---|---|
-| 1 | 基础 `run` | `arc run pdvm 'echo hi; ls /nope'` 能分开显示 stdout 和 stderr，退出码是 2 |
+| 1 | 基础 `run` | `sshtab run pdvm 'echo hi; ls /nope'` 能分开显示 stdout 和 stderr，退出码是 2 |
 | 2 | 窗口状态 | 在 `pdvm/a` 里 `cd /tmp` 后，下一次执行 `pwd` 得到 `/tmp`，而 `pdvm/b` 不受影响；激活 venv 后 `which python` 指向 venv |
-| 3 | 长命令 | `arc run pdvm 'sleep 60; echo done'` 30 秒后返回 `running`；之后 `log` 看到 `done` 和 `exit 0`；窗口正忙时 `run` 报错 |
+| 3 | 长命令 | `sshtab run pdvm 'sleep 60; echo done'` 30 秒后返回 `running`；之后 `log` 看到 `done` 和 `exit 0`；窗口正忙时 `run` 报错 |
 | 4 | `kill` / `sessions` / `close` | `kill` 之后进程组里所有进程都消失；`sessions` 显示的状态都正确 |
 | 5 | 截断 | `seq 1e7` 的结果被截断，并且很快返回 |
 | 6 | 给 Agent 用 | 写一份 Claude Code 使用说明，让它自己在 pdvm 上完成一个"跑训练脚本、看日志、改参数"的小任务 |
@@ -360,6 +360,5 @@ DESIGN.md
 
 ## 8. 待定和待验证
 
-- **名字**：`arc` 需要换掉。
 - **conda**：conda 的初始化代码一般写在 `.bashrc` 里，而非交互式 shell 可能不会加载 `.bashrc`，所以新窗口里可能没有 `conda` 命令。由于窗口会记住函数，在窗口里执行一次 `eval "$(conda shell.bash hook)"` 之后应该就能一直用 `conda activate`。pdvm 上没有装 conda，需要找一台装了 conda 的机器验证。
 - **退出码 75**：用来表示"还在跑"是否合适，等 Agent 实际用起来再看。

@@ -5,7 +5,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-CONTROL_DIR = Path.home() / ".arc" / "cm"
+CONTROL_DIR = Path.home() / ".sshtab" / "cm"
 
 
 def ssh_command(host: str) -> list[str]:
