@@ -119,25 +119,41 @@ $ arc log pdvm/train --tail 100  # 不管看过没有，显示最后 100 行
 
 ### 3.3 `arc kill`
 
-相当于在那个窗口里按 Ctrl-C。依次发送：SIGINT，等 5 秒；SIGTERM，等 5 秒；SIGKILL。信号发给整个进程组，命令启动的子进程也会一起停掉。
+相当于在那个窗口里按 Ctrl-C。依次发送：SIGINT，等 5 秒；SIGTERM，等 5 秒；SIGKILL。信号发给整个进程组，命令启动的子进程也会一起停掉。一旦进程组里的进程全部退出，就不再发送后面的信号。
 
 ```text
 $ arc kill pdvm/train
-[stopped · pdvm/train · exit 130]
+[exit 130 · pdvm/train · /data/proj]
+saving checkpoint...
+--- stderr ---
+Traceback (most recent call last):
+  ...
+KeyboardInterrupt
+stopped with SIGINT
 ```
+
+- 和 `log` 一样，会带上还没看过的输出，Agent 能看到命令最后打印了什么。
+- 最后一行写明最终用了哪个信号。只有到了 SIGKILL 这一步，状态才会是 `stopped`，命令所做的改动（cd 等）也不会保存。
+- python 收到 SIGINT 会抛出 `KeyboardInterrupt`，训练脚本可以借此保存 checkpoint。
+- 命令里用 `&` 放到后台的子进程会忽略 SIGINT（真终端里也是这样），它们会在 5 秒后被 SIGTERM 停掉。
+- 窗口里没有在跑的命令时，显示 `(nothing was running)`。
+- 只要窗口最终停下来了，`kill` 的退出码就是 0，命令自己的退出码看状态头。
 
 ### 3.4 `arc sessions`
 
 ```text
 $ arc sessions pdvm
-main   idle      /home/parallels
-train  running   /data/proj   python train.py (12m)
-logs   idle      /var/log
+WINDOW  STATUS          DIR              COMMAND
+main    exit 0          /home/parallels  ls
+train   running 12m05s  /data/proj       python train.py
+logs    exit 0          /var/log         tail -n 100 syslog
 ```
+
+状态和状态头里的写法一样，COMMAND 是正在跑或最后一次跑的命令的第一行。中文路径按终端里的显示宽度对齐。
 
 ### 3.5 `arc close`
 
-删除窗口及其状态。窗口正忙时会拒绝；加 `--force` 会先 `kill` 再关闭。
+删除窗口及其状态，再用同一个名字就会得到一个全新的窗口。窗口正忙时会拒绝，并提示先 `kill` 或者加 `--force`；加 `--force` 会先 `kill` 再关闭。关闭一个不存在的窗口不算错误，会提示 `does not exist`，退出码为 0。
 
 ---
 
@@ -175,7 +191,7 @@ hint: ...              ← 只在需要提示下一步时出现
 | 和远程命令相同 | 命令已结束，`&&` 可以照常使用 |
 | 75 | 命令还在跑（EX_TEMPFAIL，"稍后再查"） |
 | 137 | 命令没有留下退出码就消失了（`stopped`，按 SIGKILL 的惯例） |
-| 0 | `log` 一个空闲窗口 |
+| 0 | `log` 一个空闲窗口；`kill`、`sessions`、`close` 成功 |
 | 255 | arc 自身的错误：连接失败、窗口正忙、参数错误等（和 ssh 一致） |
 
 ---
@@ -189,7 +205,7 @@ hint: ...              ← 只在需要提示下一步时出现
  ┌──────────┐   系统 ssh（连接复用）   ┌──────────────────────────┐
  │ arc      │ ───────────────────────▶ │ 驱动脚本 (bash)           │
  │ (Python) │                          │  ├ 检查 / 加锁            │
- │          │ ◀─────────────────────── │  ├ 启动命令（setsid）     │
+ │          │ ◀─────────────────────── │  ├ 启动命令（独立进程组） │
  │ 格式化    │   状态行 + 截断后的输出  │  ├ 等待最多 --wait        │
  └──────────┘                          │  └ 读输出、截断、返回      │
                                        │ ~/.arc/sessions/<窗口>/   │
@@ -221,7 +237,7 @@ hint: ...              ← 只在需要提示下一步时出现
   vars.sh      所有 shell 变量（逐个 `declare -p` 的输出，可以直接 source）
   funcs.sh     所有 shell 函数（`declare -f` 的输出）
   lock         `flock` 用的锁文件
-  pid          正在跑或最后一次跑的命令的进程号（= 进程组号 = 会话号）
+  pid          正在跑或最后一次跑的命令的进程号（= 进程组号）和启动时间
   cmd          正在跑或最后一次跑的命令
   started      开始时间（Unix 秒）
   stdout       最后一条命令的 stdout
@@ -235,12 +251,18 @@ hint: ...              ← 只在需要提示下一步时出现
 1. **本地**：执行 `ssh <参数> <主机> 'bash -s'`，把驱动脚本从 ssh 的 stdin 发过去；用户命令以 base64 编码后放在脚本开头。这样用户命令里有什么引号都不需要转义，也不受命令行参数长度的限制（Linux 单个参数最长约 128KB）。显式使用 `bash`，是因为服务器上的登录 shell 可能是 zsh 或 fish。
 2. **加锁**：`flock lock`，防止两个 `run` 同时在同一个窗口里启动命令。用 `flock` 而不是 `mkdir`，是因为持有锁的进程一旦意外死掉，锁会自动释放，窗口不会被永久锁死。锁只在"检查 + 启动"这一小段时间里持有，启动的命令不会继承它。
 3. **检查是否忙碌**：存在 `pid` 并且进程还活着，就报"窗口正忙"并退出。
-4. **启动命令**：用 `setsid` 在新的会话里启动，stdin 接 `/dev/null`，stdout 和 stderr 分别写入文件。在没有作业控制的 bash 里，后台子进程不是进程组组长，所以 `setsid` 不会再 fork，`$!` 就是命令的进程号，也是它的进程组号。窗口的 shell 里依次执行：
+4. **启动命令**：打开作业控制（`set -m`）后用 `&` 在后台启动，stdin 接 `/dev/null`，stdout 和 stderr 分别写入文件。
+   - 作业控制让命令有自己的进程组（进程组号 = `$!`），`kill` 时可以整组停掉。
+   - 不打开作业控制的话，非交互式 bash 会让后台命令**忽略 SIGINT**（POSIX 规定），`kill` 发的 Ctrl-C 就完全无效。这也是没有用 `setsid` 的原因：在 `set -m` 下子进程已经是进程组组长，`setsid` 会再 fork 一次，`$!` 就不再是命令的进程号了。
+   - 同时记录进程的启动时间（`/proc/<pid>/stat` 的第 22 个字段），用来分辨"还是这个命令"和"pid 被别的进程复用了"。只检查环境变量不够可靠：刚 fork 出来、还没 exec 的进程，环境变量还是父进程的。
+
+   窗口的 shell 里依次执行：
    ```sh
    . vars.sh; . funcs.sh                    # 恢复变量和函数
    export PAGER=cat ...                     # 强制非交互设置（见 5.6）
    cd "$(<cwd)"                             # 恢复目录；目录被删了就回到家目录并提示
    trap '保存 cwd、vars.sh、funcs.sh' EXIT
+   trap 'exit 130' INT; trap 'exit 143' TERM  # 和终端一样的退出码，并且会触发保存
    eval "$用户命令"                          # 执行
    ```
    - 用 `trap EXIT` 来保存状态，这样即使用户命令里写了 `exit 3`，状态也会保存。写入退出码的步骤也放在这里。
@@ -250,7 +272,7 @@ hint: ...              ← 只在需要提示下一步时出现
 5. **解锁**，然后**等待**：每 20 毫秒检查一次是否已经有 `exit` 文件、进程是否还活着，最多等 `--wait` 秒。等待用的是对一个没人写入的 fifo 做 `read -t 0.02`，这是 bash 的内置命令，不需要 fork，所以短命令几乎没有额外延迟。
 6. **返回结果**：第一行输出一个机器可读的状态行，本地 arc 解析后再格式化成状态头；接着输出截断后的 stdout 和 stderr，并更新 `offset`。
 
-因为命令是用 `setsid` 启动、输出写在文件里的，所以**等待期间 ssh 断开或者本地按了 Ctrl-C，都不会影响命令本身**。
+因为命令的输出写在文件里、stdin 是 `/dev/null`，它不占用 ssh 连接的任何东西，所以**等待期间 ssh 断开或者本地按了 Ctrl-C，都不会影响命令本身**。
 
 ### 5.5 状态判断（`log` / `sessions` 共用）
 
@@ -259,7 +281,7 @@ hint: ...              ← 只在需要提示下一步时出现
 | 条件 | 状态 |
 |---|---|
 | 有 `exit` 文件 | exit N |
-| `pid` 存在且进程活着 | running |
+| `pid` 存在，进程活着，并且启动时间和记录的一致 | running |
 | `pid` 存在，进程已经没了 | stopped（被 SIGKILL 或意外终止） |
 | 以上都不是 | idle |
 

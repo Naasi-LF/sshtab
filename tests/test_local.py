@@ -111,8 +111,28 @@ class RenderTest(unittest.TestCase):
         self.assertEqual(
             output.render(result, "pdvm/train"),
             "[running 1m35s · pdvm/train · /data]\nepoch 1\n"
-            "hint: still running. `arc log pdvm/train` to check\n",
+            "hint: still running. `arc log pdvm/train` to check, `arc kill pdvm/train` to stop\n",
         )
+
+    def test_windows_table(self):
+        listing = (
+            f"main\texit\t0\t400\t{b64('/home/u')}\t{b64('ls')}\n"
+            f"train\trunning\t0\t95\t{b64('/data/项目')}\t{b64('python train.py')}\n"
+            f"old\tstopped\t0\t9\t{b64('/tmp')}\t{b64('')}\n"
+        )
+        self.assertEqual(output.render_windows(protocol.parse_windows(listing)), (
+            "WINDOW  STATUS         DIR         COMMAND\n"
+            "main    exit 0         /home/u     ls\n"
+            "train   running 1m35s  /data/项目  python train.py\n"
+            "old     stopped        /tmp\n"
+        ))
+
+    def test_no_windows(self):
+        self.assertEqual(output.render_windows(protocol.parse_windows("")), "(no windows)\n")
+
+    def test_bad_window_line(self):
+        with self.assertRaises(protocol.ProtocolError):
+            protocol.parse_windows("main\texit\n")
 
     def test_carriage_returns_show_last_redraw(self):
         result = protocol.Result("exit", 0, "/", "", " 10%|#  \r 50%|### \r100%|####\nok\r\n")

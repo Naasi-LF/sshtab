@@ -4,10 +4,12 @@ arc sends the driver on ssh's stdin, with its parameters prepended as shell
 assignments; the user's command is base64 so it never needs quoting. The
 driver answers with one header line followed by raw stdout and stderr bytes:
 
-    ARC1 status=running code=0 cwd=<base64> elapsed=31 cmd=<base64> out=<n bytes> err=<n bytes>\\n<stdout><stderr>
+    ARC1 status=running code=0 cwd=<base64> elapsed=31 cmd=<base64> signal= out=<n bytes> err=<n bytes>\\n<stdout><stderr>
 
-status is exit, running, stopped, idle or busy. The streams are delimited by
-their lengths, not by markers, so any output is safe.
+status is a window state (exit, running, stopped, idle) or an action outcome
+(busy, closed, missing, list). The streams are delimited by their lengths,
+not by markers, so any output is safe. For `list`, stdout holds one line per
+window; see parse_windows.
 """
 
 from __future__ import annotations
@@ -32,9 +34,10 @@ class Result:
     stderr: str
     elapsed: int = 0  # seconds since the window's last command started
     cmd: str = ""  # first line of that command
+    signal: str = ""  # last signal `kill` sent (INT, TERM or KILL), if any
 
 
-def build_script(action: str, window: str, **params: str | int) -> str:
+def build_script(action: str, window: str = "", **params: str | int) -> str:
     """Values are pasted into bash unquoted: only validated names, numbers and base64."""
     lines = [f"ARC_ACTION={action}", f"ARC_WINDOW={window}"]
     lines += [f"ARC_{key.upper()}={value}" for key, value in params.items()]
@@ -69,12 +72,27 @@ def parse(raw: bytes) -> Result:
             stderr=_text(body[out_len:out_len + err_len]),
             elapsed=int(fields.get("elapsed", 0)),
             cmd=_unb64(fields.get("cmd", "")),
+            signal=fields.get("signal", ""),
         )
     except (KeyError, ValueError) as exc:
         raise ProtocolError(f"bad header {header!r}: {exc}") from exc
     if len(body) < out_len + err_len:
         raise ProtocolError("response ended early")
     return result
+
+
+def parse_windows(stdout: str) -> list[tuple[str, Result]]:
+    """The `list` reply: one tab-separated line per window, as written by driver.sh."""
+    windows = []
+    for line in stdout.splitlines():
+        try:
+            name, state, code, elapsed, cwd, cmd = line.split("\t")
+            windows.append((name, Result(
+                state, int(code), _unb64(cwd), "", "", elapsed=int(elapsed), cmd=_unb64(cmd),
+            )))
+        except ValueError as exc:
+            raise ProtocolError(f"bad window line {line!r}: {exc}") from exc
+    return windows
 
 
 def _unb64(value: str) -> str:

@@ -198,7 +198,9 @@ class LongCommandTest(WindowTestCase):
         self.assertEqual(proc.returncode, 75)
         header, *lines = proc.stdout.splitlines()
         self.assertRegex(header, rf"^\[running \ds · {w} · .+\]$")
-        self.assertEqual(lines, ["started", f"hint: still running. `arc log {w}` to check"])
+        self.assertEqual(lines, [
+            "started", f"hint: still running. `arc log {w}` to check, `arc kill {w}` to stop",
+        ])
 
         final = self.wait_until_done(w)[-1]
         self.assertEqual(final.returncode, 0)
@@ -264,6 +266,108 @@ class LongCommandTest(WindowTestCase):
         self.assertEqual(self.run_in(w, r"printf '10%%\r50%%\r100%%\n'")[1], ["100%"])
 
 
+def remote_processes(pattern: str) -> list:
+    # "[s]leep" matches "sleep" but not this pgrep's own shell command line.
+    pattern = f"[{pattern[0]}]{pattern[1:]}"
+    proc = subprocess.run(["ssh", HOST, f"pgrep -f '{pattern}' || true"], capture_output=True, text=True)
+    return proc.stdout.split()
+
+
+class KillTest(WindowTestCase):
+    def test_ctrl_c_stops_command_and_keeps_state(self):
+        w = self.window()
+        arc("run", w, "cd /tmp; sleep 41.25", "--wait", "0")
+        start = time.monotonic()
+        proc = arc("kill", w)
+        self.assertLess(time.monotonic() - start, 3)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.splitlines(), [f"[exit 130 · {w} · /tmp]", "stopped with SIGINT"])
+        self.assertEqual(remote_processes("sleep 41.25"), [])
+        self.assertEqual(self.run_in(w, "pwd")[1], ["/tmp"])
+
+    def test_python_gets_keyboard_interrupt(self):
+        w = self.window()
+        script = "import time\ntry:\n    time.sleep(30)\nexcept KeyboardInterrupt:\n    print('saving checkpoint')\n    raise\n"
+        arc("run", w, f"python3 -c \"{script}\"", "--wait", "1")
+        proc = arc("kill", w)
+        self.assertIn("saving checkpoint", proc.stdout)
+        self.assertIn("KeyboardInterrupt", proc.stdout)
+
+    def test_escalates_to_sigkill(self):
+        w = self.window()
+        arc("run", w, "trap '' INT TERM; sleep 42.25", "--wait", "0")
+        proc = arc("kill", w)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.splitlines()[0][:9], "[stopped ")
+        self.assertIn("stopped with SIGKILL", proc.stdout)
+        self.assertEqual(remote_processes("sleep 42.25"), [])
+
+    def test_stops_child_processes_too(self):
+        w = self.window()
+        arc("run", w, "sleep 43.25 & sleep 44.25; wait", "--wait", "0")
+        self.assertEqual(arc("kill", w).returncode, 0)
+        self.assertEqual(remote_processes("sleep 4[34].25"), [])
+
+    def test_nothing_running(self):
+        w = self.window()
+        self.run_in(w, "true")
+        proc = arc("kill", w)
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(proc.stdout.splitlines()[1:], ["(nothing was running)"])
+
+    def test_waiting_run_returns_when_killed(self):
+        w = self.window()
+        waiting = subprocess.Popen(
+            [sys.executable, "-m", "arc", "run", w, "sleep 45.25", "--wait", "20"],
+            cwd=REPO, stdout=subprocess.PIPE, text=True,
+        )
+        time.sleep(1)
+        arc("kill", w)
+        out, _ = waiting.communicate(timeout=5)
+        self.assertEqual(waiting.returncode, 130)
+        self.assertTrue(out.startswith(f"[exit 130 · {w} ·"), out)
+
+
+class SessionsAndCloseTest(WindowTestCase):
+    def sessions(self) -> dict:
+        proc = arc("sessions", HOST)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return {line.split()[0]: line for line in proc.stdout.splitlines()[1:]}
+
+    def test_sessions_lists_windows_with_status(self):
+        idle, busy = self.window(), self.window()
+        self.run_in(idle, "cd /tmp")
+        arc("run", busy, "sleep 2", "--wait", "0")
+        listing = self.sessions()
+        self.assertRegex(listing[idle.split("/")[1]], r"exit 0\s+/tmp\s+cd /tmp$")
+        self.assertRegex(listing[busy.split("/")[1]], r"running \ds\s+/\S+\s+sleep 2$")
+        self.wait_until_done(busy)
+
+    def test_close_deletes_window(self):
+        w = self.window()
+        self.run_in(w, "cd /tmp; export GONE=1")
+        proc = arc("close", w)
+        self.assertEqual((proc.returncode, proc.stdout), (0, f"closed {w}\n"))
+        self.assertNotIn(w.split("/")[1], self.sessions())
+        # Using the name again starts a fresh window.
+        self.assertEqual(self.run_in(w, "echo ${GONE-unset}")[1], ["unset"])
+        self.assertNotEqual(self.run_in(w, "pwd")[1], ["/tmp"])
+
+    def test_close_refuses_running_window_unless_forced(self):
+        w = self.window()
+        arc("run", w, "sleep 46.25", "--wait", "0")
+        proc = arc("close", w)
+        self.assertEqual(proc.returncode, 255)
+        self.assertIn("--force", proc.stderr)
+        self.assertEqual(arc("close", w, "--force").stdout, f"closed {w}\n")
+        self.assertEqual(remote_processes("sleep 46.25"), [])
+
+    def test_close_missing_window(self):
+        proc = arc("close", f"{HOST}/t-never-existed")
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn("does not exist", proc.stdout)
+
+
 class ErrorTest(unittest.TestCase):
     def test_bad_window_name(self):
         proc = arc("run", "pdvm/bad name", "true")
@@ -272,6 +376,11 @@ class ErrorTest(unittest.TestCase):
 
     def test_missing_arguments(self):
         self.assertEqual(arc("run", "pdvm").returncode, 255)
+
+    def test_sessions_takes_a_host(self):
+        proc = arc("sessions", "pdvm/main")
+        self.assertEqual(proc.returncode, 255)
+        self.assertIn("arc sessions pdvm", proc.stderr)
 
     def test_bad_wait(self):
         proc = arc("run", "pdvm", "true", "--wait", "soon")

@@ -1,12 +1,17 @@
 # arc remote driver: fed to `bash -s` over ssh on every call, never installed.
-# arc prepends ARC_ACTION (run or log) and ARC_WINDOW; for run also ARC_CMD_B64
-# (the user's command, base64) and ARC_WAIT (seconds); for log also ARC_TAIL
-# (a line count, or empty for "only new output").
+# arc prepends ARC_ACTION (run, log, kill, list or close), ARC_WINDOW (except
+# for list) and, depending on the action: ARC_CMD_B64 (the user's command,
+# base64), ARC_WAIT (seconds), ARC_TAIL (a line count, or empty for "only new
+# output"), ARC_FORCE (1 or empty).
 # Window files: DESIGN.md 5.3. Reply format: arc/protocol.py.
 
-arc_dir=~/.arc/sessions/$ARC_WINDOW
+arc_sessions=~/.arc/sessions
+arc_dir=$arc_sessions/${ARC_WINDOW-}
 arc_tmp=$(mktemp -d) || exit 1
 trap 'rm -rf "$arc_tmp"' EXIT
+: >"$arc_tmp/stdout"
+: >"$arc_tmp/stderr"
+arc_signal=
 
 # The window's shell: restore its saved state, run the command, save the new state.
 # The state is cwd, every shell variable (exported or not) and every function.
@@ -52,21 +57,57 @@ trap '__arc_rc=$?
   printf "%s" "$__arc_rc" >"$__arc_dir/exit.new"
   mv -f "$__arc_dir/exit.new" "$__arc_dir/exit"
   exit $__arc_rc' EXIT
+# Like a terminal: Ctrl-C ends the command with 130, SIGTERM with 143.
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 eval "$(<"$__arc_dir/cmd")"
 EOF
 
-# Sets arc_state to exit, running, stopped (died without an exit file, e.g.
-# SIGKILL) or idle (never ran anything).
-arc_read_state() {
+# Sets arc_starttime to when pid $1 started (clock ticks since boot, field 22
+# of /proc/<pid>/stat), or to empty if there is no such process. Never forks.
+arc_read_starttime() {
+  local stat fields
+  arc_starttime=
+  read -r stat 2>/dev/null <"/proc/$1/stat" || return 1
+  # Fields after the "(command name)", which may itself contain spaces.
+  read -r -a fields <<<"${stat##*) }"
+  arc_starttime=${fields[19]}
+}
+
+# Is pid $1 still this window's command, and not an unrelated process that
+# reused the pid? A reused pid has a different start time.
+arc_is_ours() {
+  kill -0 "$1" 2>/dev/null || return 1
+  [ -d /proc/self ] || return 0
+  arc_read_starttime "$1" && [ "$arc_starttime" = "$arc_pidstart" ]
+}
+
+# Sets arc_state (exit, running, stopped or idle; DESIGN.md 5.5) and, from the
+# window's files, arc_pid, arc_code, arc_cwd, arc_elapsed and arc_cmdline.
+arc_inspect() {
+  local now
+  arc_pid= arc_pidstart= arc_code=0 arc_cwd=$HOME arc_elapsed=0 arc_cmdline=
+  [ -f "$arc_dir/pid" ] && read -r arc_pid arc_pidstart <"$arc_dir/pid"
   if [ -f "$arc_dir/exit" ]; then
     arc_state=exit
-  elif [ -f "$arc_dir/pid" ] && kill -0 "$(<"$arc_dir/pid")" 2>/dev/null; then
+    arc_code=$(<"$arc_dir/exit")
+  elif [ -n "$arc_pid" ] && arc_is_ours "$arc_pid"; then
     arc_state=running
-  elif [ -f "$arc_dir/pid" ]; then
+  elif [ -n "$arc_pid" ]; then
     arc_state=stopped
   else
     arc_state=idle
+  fi
+  [ -f "$arc_dir/cwd" ] && arc_cwd=$(<"$arc_dir/cwd")
+  if [ -f "$arc_dir/cmd" ]; then
+    arc_cmdline=$(<"$arc_dir/cmd")
+    arc_cmdline=${arc_cmdline%%$'\n'*}
+    arc_cmdline=${arc_cmdline:0:200}
+  fi
+  if [ -f "$arc_dir/started" ]; then
+    printf -v now '%(%s)T' -1
+    arc_elapsed=$((now - $(<"$arc_dir/started")))
   fi
 }
 
@@ -95,47 +136,58 @@ arc_collect() {
 
 arc_b64() { printf '%s' "$1" | base64 -w0; }
 
-# Prints the reply: one header line, then the collected stdout and stderr.
+# Prints the reply: a header with status $1 and the values from arc_inspect,
+# then whatever stdout and stderr were collected into $arc_tmp.
 arc_reply() {
-  local status=$1 code=0 cwd=$HOME elapsed=0 cmd= now
-  [ -f "$arc_dir/cwd" ] && cwd=$(<"$arc_dir/cwd")
-  [ -f "$arc_dir/exit" ] && code=$(<"$arc_dir/exit")
-  if [ -f "$arc_dir/cmd" ]; then
-    cmd=$(<"$arc_dir/cmd")
-    cmd=${cmd%%$'\n'*}
-    cmd=${cmd:0:200}
-  fi
-  if [ -f "$arc_dir/started" ]; then
-    printf -v now '%(%s)T' -1
-    elapsed=$((now - $(<"$arc_dir/started")))
-  fi
-  [ -f "$arc_tmp/stdout" ] || : >"$arc_tmp/stdout"
-  [ -f "$arc_tmp/stderr" ] || : >"$arc_tmp/stderr"
-  printf 'ARC1 status=%s code=%d cwd=%s elapsed=%d cmd=%s out=%d err=%d\n' \
-    "$status" "$code" "$(arc_b64 "$cwd")" "$elapsed" "$(arc_b64 "$cmd")" \
-    "$(wc -c <"$arc_tmp/stdout")" "$(wc -c <"$arc_tmp/stderr")"
+  printf 'ARC1 status=%s code=%d cwd=%s elapsed=%d cmd=%s signal=%s out=%d err=%d\n' \
+    "$1" "$arc_code" "$(arc_b64 "$arc_cwd")" "$arc_elapsed" "$(arc_b64 "$arc_cmdline")" \
+    "$arc_signal" "$(wc -c <"$arc_tmp/stdout")" "$(wc -c <"$arc_tmp/stderr")"
   cat "$arc_tmp/stdout" "$arc_tmp/stderr"
 }
 
-# Waits up to $1 seconds for the command to finish. Polls every 20ms without
-# forking: `read -t` on a fifo that nobody writes to is a builtin sleep.
-arc_wait() {
-  local ticks=$(($1 * 50)) pid
-  pid=$(<"$arc_dir/pid")
-  mkfifo "$arc_tmp/tick" && exec 8<>"$arc_tmp/tick"
-  while [ ! -f "$arc_dir/exit" ] && kill -0 "$pid" 2>/dev/null && [ "$ticks" -gt 0 ]; do
-    read -r -t 0.02 -u 8
+# Sleeps 20ms without forking: `read -t` on a fifo that nobody writes to.
+arc_nap() {
+  if [ ! -p "$arc_tmp/tick" ]; then
+    mkfifo "$arc_tmp/tick" && exec 8<>"$arc_tmp/tick"
+  fi
+  read -r -t 0.02 -u 8
+}
+
+# Re-checks "$2" every 20ms while it succeeds, for at most $1 seconds.
+arc_while() {
+  local ticks=$(($1 * 50))
+  while [ "$ticks" -gt 0 ] && "$2"; do
+    arc_nap
     ticks=$((ticks - 1))
   done
-  exec 8>&-
+}
+
+arc_unfinished() { [ ! -f "$arc_dir/exit" ] && kill -0 "$arc_pid" 2>/dev/null; }
+arc_group_alive() { kill -0 -- "-$arc_pid" 2>/dev/null; }
+
+# Ctrl-C, then SIGTERM, then SIGKILL to the command's whole process group, each
+# time giving it 5 seconds to exit. Sets arc_signal to the last one sent.
+arc_stop() {
+  local sig
+  for sig in INT TERM KILL; do
+    arc_group_alive || return
+    kill -s "$sig" -- "-$arc_pid" 2>/dev/null
+    arc_signal=$sig
+    arc_while 5 arc_group_alive
+  done
+}
+
+# Takes the window's lock; one start, close or similar at a time per window.
+# flock is released even if we get killed.
+arc_lock() {
+  exec 9>"$arc_dir/lock"
+  flock -w 5 9
 }
 
 arc_run() {
   mkdir -p "$arc_dir" || exit 1
-  # One start at a time per window. flock is released even if we get killed.
-  exec 9>"$arc_dir/lock"
-  flock -w 5 9 || { arc_reply busy; return; }
-  arc_read_state
+  arc_lock || { arc_inspect; arc_reply busy; return; }
+  arc_inspect
   if [ "$arc_state" = running ]; then
     arc_reply busy
     return
@@ -148,29 +200,84 @@ arc_run() {
   # Once a window has saved state, start from an empty environment so that
   # variables the user unset stay unset; a new window inherits the login env.
   [ -f "$arc_dir/vars.sh" ] && arc_clean=1
-  # setsid: a session and process group of its own, so the command survives
-  # ssh disconnecting and can be stopped as a whole. With no job control, the
-  # child is not a group leader, so setsid does not fork and $! is its pid.
-  # stdin is /dev/null so nothing can sit waiting for input.
-  setsid env ${arc_clean:+-i} __arc_dir="$arc_dir" "$BASH" -c "$arc_window_shell" \
+  # Job control (set -m) gives the command a process group of its own, so it
+  # can be stopped as a whole. Without it, bash would start the background
+  # command with SIGINT ignored, and Ctrl-C (`arc kill`) could not reach it.
+  # Output goes to files and stdin is /dev/null, so the command holds nothing
+  # of the ssh connection and keeps running after ssh disconnects.
+  set -m
+  env ${arc_clean:+-i} __arc_dir="$arc_dir" "$BASH" -c "$arc_window_shell" \
     </dev/null >"$arc_dir/stdout" 2>"$arc_dir/stderr" 9>&- &
-  echo $! >"$arc_dir/pid"
+  arc_pid=$!
+  set +m
+  arc_read_starttime "$arc_pid"
+  arc_pidstart=$arc_starttime
+  echo "$arc_pid $arc_pidstart" >"$arc_dir/pid"
   exec 9>&-
 
-  arc_wait "$ARC_WAIT"
-  arc_read_state
+  arc_while "$ARC_WAIT" arc_unfinished
+  arc_inspect
   arc_collect
   arc_reply "$arc_state"
 }
 
 arc_log() {
-  arc_read_state
+  arc_inspect
   arc_collect
   arc_reply "$arc_state"
+}
+
+arc_kill() {
+  arc_inspect
+  [ "$arc_state" = running ] && arc_stop
+  arc_inspect
+  arc_collect
+  arc_reply "$arc_state"
+}
+
+# One line per window: name, state, exit code, elapsed seconds, cwd (base64)
+# and command (base64), separated by tabs.
+arc_list() {
+  local d
+  for d in "$arc_sessions"/*/; do
+    [ -d "$d" ] || continue
+    arc_dir=${d%/}
+    arc_inspect
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "${arc_dir##*/}" "$arc_state" "$arc_code" \
+      "$arc_elapsed" "$(arc_b64 "$arc_cwd")" "$(arc_b64 "$arc_cmdline")"
+  done >"$arc_tmp/stdout"
+  arc_reply list
+}
+
+arc_close() {
+  if [ ! -d "$arc_dir" ]; then
+    arc_inspect
+    arc_reply missing
+    return
+  fi
+  arc_lock || { arc_inspect; arc_reply busy; return; }
+  arc_inspect
+  if [ "$arc_state" = running ]; then
+    if [ -z "${ARC_FORCE-}" ]; then
+      arc_reply busy
+      return
+    fi
+    arc_stop
+    arc_inspect
+    if [ "$arc_state" = running ]; then
+      arc_reply busy
+      return
+    fi
+  fi
+  rm -rf "$arc_dir"
+  arc_reply closed
 }
 
 case $ARC_ACTION in
   run) arc_run ;;
   log) arc_log ;;
+  kill) arc_kill ;;
+  list) arc_list ;;
+  close) arc_close ;;
   *) echo "arc driver: unknown action $ARC_ACTION" >&2; exit 1 ;;
 esac

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import unicodedata
+
 from arc.protocol import Result
 
 
@@ -36,8 +38,26 @@ def render(result: Result, target: str, empty_note: str = "") -> str:
     if not stdout and not stderr and empty_note:
         parts.append(empty_note + "\n")
     if result.status == "running":
-        parts.append(f"hint: still running. `arc log {target}` to check\n")
+        parts.append(f"hint: still running. `arc log {target}` to check, `arc kill {target}` to stop\n")
     return "".join(parts)
+
+
+def render_windows(windows: list[tuple[str, Result]]) -> str:
+    if not windows:
+        return "(no windows)\n"
+    rows = [("WINDOW", "STATUS", "DIR", "COMMAND")]
+    rows += [(name, status_label(r), r.cwd, r.cmd) for name, r in windows]
+    widths = [max(_width(row[i]) for row in rows) for i in range(len(rows[0]))]
+    return "".join(
+        "  ".join(cell + " " * (width - _width(cell)) for cell, width in zip(row, widths)).rstrip()
+        + "\n"
+        for row in rows
+    )
+
+
+def _width(text: str) -> int:
+    """Terminal columns: CJK and other wide characters take two."""
+    return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in text)
 
 
 def _as_terminal(text: str) -> str:

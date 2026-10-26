@@ -84,6 +84,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--tail", type=non_negative_int, metavar="N",
         help="show the last N lines instead, whether seen before or not",
     )
+
+    kill = actions.add_parser(
+        "kill", help="stop a window's command: Ctrl-C, then SIGTERM, then SIGKILL",
+    )
+    kill.add_argument("target", help="host or host/window (default window: main)")
+
+    sessions = actions.add_parser("sessions", help="list a host's windows")
+    sessions.add_argument("target", metavar="host")
+
+    close = actions.add_parser("close", help="delete a window and its state")
+    close.add_argument("target", help="host or host/window (default window: main)")
+    close.add_argument("--force", action="store_true", help="stop its command first if running")
     return parser
 
 
@@ -91,11 +103,19 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         target = parse_target(args.target)
+        if args.action == "sessions" and "/" in args.target:
+            raise ValueError(f"sessions takes a host, not a window: try `arc sessions {target.host}`")
     except ValueError as exc:
         return _fail(str(exc))
     if args.action == "run":
         return cmd_run(target, args.command, args.wait)
-    return cmd_log(target, args.tail)
+    if args.action == "log":
+        return cmd_log(target, args.tail)
+    if args.action == "kill":
+        return cmd_kill(target)
+    if args.action == "sessions":
+        return cmd_sessions(target.host)
+    return cmd_close(target, args.force)
 
 
 def cmd_run(target: Target, command: str, wait: int) -> int:
@@ -104,14 +124,15 @@ def cmd_run(target: Target, command: str, wait: int) -> int:
     script = protocol.build_script(
         "run", target.window, cmd_b64=protocol.encode_command(command), wait=wait,
     )
-    result = _call(target, script)
+    result = _call(target.host, script)
     if result is None:
         return EXIT_ARC_ERROR
     if result.status == "busy":
         other = "main" if target.window != DEFAULT_WINDOW else "main2"
         return _fail(
-            f"{target} is busy ({result.cmd}, {output.duration(result.elapsed)})\n"
-            f"hint: use another window, e.g. `arc run {target.host}/{other} '...'`"
+            f"{_busy(target, result)}\n"
+            f"hint: use another window, e.g. `arc run {target.host}/{other} '...'`, "
+            f"or `arc kill {target}` to stop it"
         )
     sys.stdout.write(output.render(result, str(target)))
     return _exit_code(result)
@@ -119,20 +140,64 @@ def cmd_run(target: Target, command: str, wait: int) -> int:
 
 def cmd_log(target: Target, tail: int | None) -> int:
     script = protocol.build_script("log", target.window, tail="" if tail is None else tail)
-    result = _call(target, script)
+    result = _call(target.host, script)
     if result is None:
         return EXIT_ARC_ERROR
     sys.stdout.write(output.render(result, str(target), empty_note="(no new output)"))
     return _exit_code(result)
 
 
-def _call(target: Target, script: str) -> protocol.Result | None:
-    proc = ssh.run_script(target.host, script)
+def cmd_kill(target: Target) -> int:
+    result = _call(target.host, protocol.build_script("kill", target.window))
+    if result is None:
+        return EXIT_ARC_ERROR
+    if result.status == "running":
+        return _fail(f"could not stop {target}: still running after SIGKILL")
+    sys.stdout.write(output.render(result, str(target)))
+    print(f"stopped with SIG{result.signal}" if result.signal else "(nothing was running)")
+    return 0
+
+
+def cmd_sessions(host: str) -> int:
+    result = _call(host, protocol.build_script("list"))
+    if result is None:
+        return EXIT_ARC_ERROR
+    try:
+        windows = protocol.parse_windows(result.stdout)
+    except protocol.ProtocolError as exc:
+        return _fail(f"bad reply from {host}: {exc}")
+    sys.stdout.write(output.render_windows(windows))
+    return 0
+
+
+def cmd_close(target: Target, force: bool) -> int:
+    script = protocol.build_script("close", target.window, force="1" if force else "")
+    result = _call(target.host, script)
+    if result is None:
+        return EXIT_ARC_ERROR
+    if result.status == "busy":
+        hint = "" if force else (
+            f"\nhint: `arc kill {target}` first, or `arc close {target} --force`"
+        )
+        return _fail(_busy(target, result) + hint)
+    if result.status == "missing":
+        print(f"{target} does not exist (nothing to close)")
+    else:
+        print(f"closed {target}")
+    return 0
+
+
+def _busy(target: Target, result: protocol.Result) -> str:
+    return f"{target} is busy ({result.cmd}, {output.duration(result.elapsed)})"
+
+
+def _call(host: str, script: str) -> protocol.Result | None:
+    proc = ssh.run_script(host, script)
     try:
         return protocol.parse(proc.stdout)
     except protocol.ProtocolError:
         detail = proc.stderr.decode(errors="replace").strip()
-        _fail(f"cannot run on {target.host}: {detail or 'no response from remote driver'}")
+        _fail(f"cannot run on {host}: {detail or 'no response from remote driver'}")
         return None
 
 
