@@ -18,6 +18,7 @@ type replyOpts struct {
 	status         string
 	elapsed        int
 	cmd, signal    string
+	dest           string
 	outCut, errCut string
 }
 
@@ -29,8 +30,8 @@ func fakeReply(o replyOpts) []byte {
 		o.status = "exit"
 	}
 	return []byte(fmt.Sprintf(
-		"SSHTAB1 status=%s code=%d cwd=%s elapsed=%d cmd=%s signal=%s out_cut=%s err_cut=%s out=%d err=%d\n%s%s",
-		o.status, o.code, b64(o.cwd), o.elapsed, b64(o.cmd), o.signal, o.outCut, o.errCut,
+		"SSHTAB1 status=%s code=%d cwd=%s elapsed=%d cmd=%s signal=%s dest=%s out_cut=%s err_cut=%s out=%d err=%d\n%s%s",
+		o.status, o.code, b64(o.cwd), o.elapsed, b64(o.cmd), o.signal, b64(o.dest), o.outCut, o.errCut,
 		len(o.out), len(o.err), o.out, o.err))
 }
 

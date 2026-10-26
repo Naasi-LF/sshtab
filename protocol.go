@@ -2,26 +2,31 @@ package main
 
 // Wire format between sshtab and the remote driver (driver.sh).
 //
-// sshtab sends the driver on ssh's stdin, with its parameters prepended as
-// shell assignments; the user's command is base64 so it never needs quoting.
-// The driver answers with one header line followed by raw stdout and stderr:
+// sshtab sends the driver on ssh's stdin (on the command line for push and
+// pull), with its parameters prepended as shell assignments; the user's
+// command is base64 so it never needs quoting. The driver answers with one
+// header line followed by raw stdout and stderr:
 //
-//	SSHTAB1 status=running code=0 cwd=<base64> elapsed=31 cmd=<base64> signal= out_cut= err_cut= out=<n bytes> err=<n bytes>\n<stdout><stderr>
+//	SSHTAB1 status=running code=0 cwd=<base64> elapsed=31 cmd=<base64> signal= dest= out_cut= err_cut= out=<n bytes> err=<n bytes>\n<stdout><stderr>
 //
 // status is a window state (exit, running, stopped, idle) or an action
-// outcome (busy, closed, missing, list). The streams are delimited by their
-// lengths, not by markers, so any output is safe. For list, stdout holds one
-// line per window; see parseWindows.
+// outcome (busy, closed, missing, list, pushed, pulled, failed). The streams
+// are delimited by their lengths, not by markers, so any output is safe. For
+// list, stdout holds one line per window; see parseWindows. For missing, it
+// holds the paths that do not exist. A pulled header is followed by a tar
+// stream to the end of the output.
 //
 // A stream that was too long arrives as its first and last bytes only, and
 // its *_cut field says "<head bytes>:<omitted bytes>:<omitted newlines>".
 
 import (
+	"bufio"
 	"bytes"
 	_ "embed"
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 )
@@ -40,6 +45,7 @@ type result struct {
 	elapsed   int      // seconds since the window's last command started
 	cmd       string   // first line of that command
 	signal    string   // last signal `kill` sent (INT, TERM or KILL), if any
+	dest      string   // the server directory push wrote to
 	truncated []string // names of the streams whose middle was cut out
 }
 
@@ -82,14 +88,55 @@ func parseReply(raw []byte) (result, error) {
 	return r, nil
 }
 
-func parseHeader(header, body []byte) (result, error) {
+// readReply reads one reply from a stream and leaves whatever follows it (a
+// pull's tar data) unread in br.
+func readReply(br *bufio.Reader) (result, error) {
+	for {
+		line, err := br.ReadBytes('\n')
+		if bytes.HasPrefix(line, []byte(magic)) && bytes.HasSuffix(line, []byte("\n")) {
+			header := bytes.TrimSuffix(line, []byte("\n"))
+			fields, err := headerFields(header)
+			if err != nil {
+				return result{}, fmt.Errorf("bad header %q: %w", header, err)
+			}
+			outLen, err1 := strconv.Atoi(fields["out"])
+			errLen, err2 := strconv.Atoi(fields["err"])
+			if err1 != nil || err2 != nil || outLen < 0 || errLen < 0 {
+				return result{}, fmt.Errorf("bad header %q: bad stream lengths", header)
+			}
+			body := make([]byte, outLen+errLen)
+			if _, err := io.ReadFull(br, body); err != nil {
+				return result{}, errors.New("response ended early")
+			}
+			r, err := parseHeader(header, body)
+			if err != nil {
+				return result{}, fmt.Errorf("bad header %q: %w", header, err)
+			}
+			return r, nil
+		}
+		// Anything else is noise from server startup files.
+		if err != nil {
+			return result{}, errors.New("no header from remote driver")
+		}
+	}
+}
+
+func headerFields(header []byte) (map[string]string, error) {
 	fields := map[string]string{}
 	for _, item := range strings.Fields(string(header))[1:] {
 		key, value, ok := strings.Cut(item, "=")
 		if !ok {
-			return result{}, fmt.Errorf("field without '=': %q", item)
+			return nil, fmt.Errorf("field without '=': %q", item)
 		}
 		fields[key] = value
+	}
+	return fields, nil
+}
+
+func parseHeader(header, body []byte) (result, error) {
+	fields, err := headerFields(header)
+	if err != nil {
+		return result{}, err
 	}
 	var r result
 	var outLen, errLen int
@@ -107,6 +154,7 @@ func parseHeader(header, body []byte) (result, error) {
 		{"elapsed", false, &r.elapsed},
 		{"cmd", false, &r.cmd},
 		{"signal", false, &r.signal},
+		{"dest", false, &r.dest},
 		{"out_cut", false, &outCut},
 		{"err_cut", false, &errCut},
 	} {
@@ -128,12 +176,14 @@ func parseHeader(header, body []byte) (result, error) {
 			*into = value
 		}
 	}
-	var err error
 	if r.cwd, err = unb64(r.cwd); err != nil {
 		return result{}, fmt.Errorf("cwd: %w", err)
 	}
 	if r.cmd, err = unb64(r.cmd); err != nil {
 		return result{}, fmt.Errorf("cmd: %w", err)
+	}
+	if r.dest, err = unb64(r.dest); err != nil {
+		return result{}, fmt.Errorf("dest: %w", err)
 	}
 	if len(body) < outLen+errLen {
 		return result{}, errors.New("response ended early")

@@ -69,13 +69,6 @@ type proc struct {
 // lines splits stdout into lines, like Python's splitlines.
 func (p proc) lines() []string { return splitLines(p.stdout) }
 
-func splitLines(s string) []string {
-	if s == "" {
-		return nil
-	}
-	return strings.Split(strings.TrimSuffix(s, "\n"), "\n")
-}
-
 func sshtab(t *testing.T, args ...string) proc { return sshtabIn(t, "", args...) }
 
 func sshtabIn(t *testing.T, stdin string, args ...string) proc {
@@ -700,4 +693,122 @@ func TestE2EUnknownHost(t *testing.T) {
 	p := sshtab(t, "run", "no-such-host.invalid", "true")
 	assertEqual(t, p.code, exitError)
 	assertContains(t, p.stderr, "cannot run on no-such-host.invalid")
+}
+
+// --- push and pull ---
+
+func TestE2EPushIntoWindowDirectoryAndPullBack(t *testing.T) {
+	e := newE2E(t)
+	w, dir := e.window(), e.tmpPath("")
+	e.runIn(w, "mkdir -p "+dir+" && cd "+dir)
+
+	local := t.TempDir()
+	payload := make([]byte, 1<<20)
+	rand.Read(payload)
+	if err := os.WriteFile(filepath.Join(local, "blob.bin"), payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(local, "data", "a b 测试.csv"), "1,2\n", 0o644)
+	writeFile(t, filepath.Join(local, "data", "-dash.txt"), "dash\n", 0o644)
+	writeFile(t, filepath.Join(local, "run.sh"), "#!/bin/sh\necho ran\n", 0o755)
+	os.Symlink("run.sh", filepath.Join(local, "data", "link"))
+
+	p := sshtab(t, "push", w, filepath.Join(local, "blob.bin"), filepath.Join(local, "data"), filepath.Join(local, "run.sh"))
+	assertEqual(t, p.code, 0)
+	assertEqual(t, p.lines()[0], "[pushed 5 files, 1.0 MB · "+w+" · "+dir+"]")
+	_, lines := e.runIn(w, "./run.sh; cat 'data/a b 测试.csv' data/-dash.txt; readlink data/link")
+	assertEqual(t, lines, []string{"ran", "1,2", "dash", "run.sh"})
+
+	back := t.TempDir()
+	p = sshtab(t, "pull", w, "blob.bin", "data/", "run.sh", "--to", back)
+	assertEqual(t, p.code, 0)
+	assertEqual(t, p.lines()[0], "[pulled 5 files, 1.0 MB · "+w+" · "+dir+"]")
+	got, _ := os.ReadFile(filepath.Join(back, "blob.bin"))
+	if !bytes.Equal(got, payload) {
+		t.Fatal("blob.bin changed in the round trip")
+	}
+	assertEqual(t, readFile(t, filepath.Join(back, "data", "a b 测试.csv")), "1,2\n")
+	info, _ := os.Stat(filepath.Join(back, "run.sh"))
+	assertEqual(t, info.Mode().Perm(), os.FileMode(0o755))
+	link, _ := os.Readlink(filepath.Join(back, "data", "link"))
+	assertEqual(t, link, "run.sh")
+}
+
+func TestE2EPushTo(t *testing.T) {
+	e := newE2E(t)
+	w, dir := e.window(), e.tmpPath("")
+	e.runIn(w, "mkdir -p "+dir+" && cd "+dir)
+	local := t.TempDir()
+	writeFile(t, filepath.Join(local, "f.txt"), "x", 0o644)
+
+	p := sshtab(t, "push", w, filepath.Join(local, "f.txt"), "--to", "new/sub")
+	assertEqual(t, p.lines()[1], "into "+dir+"/new/sub")
+	p = sshtab(t, "push", w, filepath.Join(local, "f.txt"), "--to", dir+"/abs")
+	assertEqual(t, p.lines()[1], "into "+dir+"/abs")
+	_, lines := e.runIn(w, "cat new/sub/f.txt abs/f.txt")
+	assertEqual(t, lines, []string{"xx"})
+
+	// '~/...' means the server's home, which is also where a fresh window starts.
+	name := "sshtab-test-" + randomName()
+	e.cleanup = append(e.cleanup, "~/"+name)
+	p = sshtab(t, "push", w, filepath.Join(local, "f.txt"), "--to", "~/"+name)
+	assertEqual(t, p.code, 0)
+	_, lines = e.runIn(e.window(), "cat "+name+"/f.txt")
+	assertEqual(t, lines, []string{"x"})
+}
+
+func TestE2EPullWhileTheWindowIsBusy(t *testing.T) {
+	e := newE2E(t)
+	w, dir := e.window(), e.tmpPath("")
+	e.runIn(w, "mkdir -p "+dir+" && cd "+dir)
+	sshtab(t, "run", w, "for i in 1 2 3; do echo epoch $i >> train.log; sleep 1; done", "--wait", "0")
+	time.Sleep(1500 * time.Millisecond)
+	back := t.TempDir()
+	p := sshtab(t, "pull", w, "train.log", "--to", back)
+	assertEqual(t, p.code, 0)
+	assertContains(t, readFile(t, filepath.Join(back, "train.log")), "epoch 1\n")
+	// The command kept running.
+	assertEqual(t, sshtab(t, "log", w).code, exitRunning)
+	e.waitUntilDone(w)
+}
+
+func TestE2ETransfersDoNotCreateWindows(t *testing.T) {
+	newE2E(t)
+	name := "t-" + randomName()
+	local := t.TempDir()
+	writeFile(t, filepath.Join(local, "f.txt"), "x", 0o644)
+	dest := "/tmp/sshtab-test-" + randomName()
+	defer onServer(t, "rm -rf "+dest)
+	assertEqual(t, sshtab(t, "push", testHost+"/"+name, filepath.Join(local, "f.txt"), "--to", dest).code, 0)
+	assertEqual(t, sshtab(t, "pull", testHost+"/"+name, dest+"/f.txt", "--to", local+"/back").code, 0)
+	assertEqual(t, strings.TrimSpace(onServer(t, "test -e ~/.sshtab/sessions/"+name+" && echo yes || echo no")), "no")
+}
+
+func TestE2EPullMissingFiles(t *testing.T) {
+	e := newE2E(t)
+	w := e.window()
+	e.runIn(w, "cd /tmp")
+	back := t.TempDir()
+	p := sshtab(t, "pull", w, "/etc/hostname", "no-such-file-"+randomName(), "--to", back)
+	assertEqual(t, p.code, exitError)
+	assertContains(t, p.stderr, "no such file on "+w+": no-such-file-")
+	if _, err := os.Stat(filepath.Join(back, "hostname")); err == nil {
+		t.Fatal("pulled files although one was missing")
+	}
+}
+
+func TestE2EBigFile(t *testing.T) {
+	e := newE2E(t)
+	w, dir := e.window(), e.tmpPath("")
+	e.runIn(w, "mkdir -p "+dir+" && cd "+dir+" && head -c 50000000 /dev/urandom > big.bin && sha256sum big.bin")
+	back := t.TempDir()
+	start := time.Now()
+	assertEqual(t, sshtab(t, "pull", w, "big.bin", "--to", back).code, 0)
+	assertFaster(t, start, 20*time.Second)
+	_, lines := e.runIn(w, "sha256sum big.bin")
+	out, err := exec.Command("shasum", "-a", "256", filepath.Join(back, "big.bin")).Output()
+	if err != nil {
+		t.Skip("no shasum locally")
+	}
+	assertEqual(t, strings.Fields(string(out))[0], strings.Fields(lines[0])[0])
 }

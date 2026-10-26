@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"unicode"
 )
@@ -57,6 +58,32 @@ func render(r result, target, emptyNote string) string {
 	}
 	if r.status == "running" {
 		fmt.Fprintf(&b, "hint: still running. `sshtab log %s` to check, `sshtab kill %s` to stop\n", target, target)
+	}
+	return b.String()
+}
+
+// renderTransfer reports a push or pull: a header, the destination when it is
+// not the default, and the files moved (the first 20 of them).
+func renderTransfer(verb string, t transferred, target, cwd, into string) string {
+	const shown = 20
+	var b strings.Builder
+	noun := "files"
+	if len(t.files) == 1 {
+		noun = "file"
+	}
+	status := fmt.Sprintf("%s %d %s, %s", verb, len(t.files), noun, formatSize(int(t.bytes)))
+	b.WriteString(header(status, target, cwd) + "\n")
+	if into != "" {
+		b.WriteString("into " + into + "\n")
+	}
+	files := append([]string(nil), t.files...)
+	sort.Strings(files)
+	for i, name := range files {
+		if i == shown {
+			fmt.Fprintf(&b, "  ... and %d more\n", len(files)-shown)
+			break
+		}
+		b.WriteString("  " + name + "\n")
 	}
 	return b.String()
 }
@@ -137,6 +164,14 @@ func asTerminal(s string) string {
 		lines[i] = line
 	}
 	return strings.Join(lines, "\n")
+}
+
+// splitLines splits text into lines, ignoring one trailing newline.
+func splitLines(s string) []string {
+	if s == "" {
+		return nil
+	}
+	return strings.Split(strings.TrimSuffix(s, "\n"), "\n")
 }
 
 func withNewline(s string) string {

@@ -63,6 +63,8 @@ sshtab log      <主机[/窗口]> [--tail N]              # 看窗口的输出
 sshtab kill     <主机[/窗口]>                         # 相当于按 Ctrl-C
 sshtab sessions <主机>                                # 列出所有窗口
 sshtab close    <主机[/窗口]> [--force]               # 关闭窗口
+sshtab push     <主机[/窗口]> <本地路径>... [--to 远程目录]   # 传文件到服务器
+sshtab pull     <主机[/窗口]> <远程路径>... [--to 本地目录]   # 从服务器拿文件
 ```
 
 ### 3.1 `sshtab run`
@@ -154,6 +156,39 @@ logs    exit 0          /var/log         tail -n 100 syslog
 ### 3.5 `sshtab close`
 
 删除窗口及其状态，再用同一个名字就会得到一个全新的窗口。窗口正忙时会拒绝，并提示先 `kill` 或者加 `--force`；加 `--force` 会先 `kill` 再关闭。关闭一个不存在的窗口不算错误，会提示 `does not exist`，退出码为 0。
+
+### 3.6 `sshtab push` / `sshtab pull`
+
+在本地和服务器之间复制文件或目录。
+
+```text
+$ sshtab push pdvm/iris iris.csv train.py
+[pushed 2 files, 6.6 KB · pdvm/iris · /home/parallels/iris]
+  iris.csv
+  train.py
+
+$ sshtab pull pdvm/iris results train.py --to ./out
+[pulled 3 files, 2.9 KB · pdvm/iris · /home/parallels/iris]
+into ./out
+  results/metrics.json
+  results/model.json
+  train.py
+```
+
+| 规则 | 说明 |
+|---|---|
+| 远程路径 | 相对路径从**窗口的当前目录**算起，和 `run` 一致；也可以写 `~/…` 或绝对路径 |
+| 本地路径 | 从本地运行 sshtab 时所在的目录算起 |
+| 目标目录 | 不写 `--to` 时：push 传到窗口的当前目录，pull 放到本地的当前目录；目录不存在会自动创建 |
+| 文件和目录 | 保留原来的名字，目录递归复制，和 `cp -r` 一样；已存在的文件会被覆盖 |
+| 保留什么 | 权限、修改时间；符号链接按链接本身复制，不跟随 |
+| 窗口正忙 | 照样可以传，比如训练跑到一半时拉一份 checkpoint；不会改变窗口的任何状态，也不会新建窗口 |
+| 出错 | 任何一个源文件不存在，就一个都不传，并列出缺的文件；退出码 255 |
+| 输出 | 状态头加文件列表（最多显示 20 个）；目标不是默认位置时多一行 `into …` |
+
+不做的：通配符（本地和远程 shell 谁来展开容易搞混）、增量同步、断点续传、进度条、`--delete`。大量文件反复同步、或者慢速网络上的大文件，还是用 rsync 更合适。
+
+服务器路径以 `~` 开头时要加引号，否则本地 shell 会先把它展开成本地路径。sshtab 发现找不到的路径以本地家目录开头时，会专门提示这一点。
 
 ---
 
@@ -279,7 +314,7 @@ hint: output truncated. In full: ~/.sshtab/sessions/main/stdout on the server, u
    窗口的 shell 里依次执行：
    ```sh
    . vars.sh; . funcs.sh                    # 恢复变量和函数
-   export PAGER=cat ...                     # 强制非交互设置（见 5.6）
+   export PAGER=cat ...                     # 强制非交互设置（见 5.7）
    cd "$(<cwd)"                             # 恢复目录；目录被删了就回到家目录并提示
    trap '保存 cwd、vars.sh、funcs.sh' EXIT
    trap 'exit 130' INT; trap 'exit 143' TERM  # 和终端一样的退出码，并且会触发保存
@@ -309,7 +344,15 @@ hint: output truncated. In full: ~/.sshtab/sessions/main/stdout on the server, u
 
 被 SIGKILL 杀掉时 `trap` 不会执行，所以窗口会保留**这条命令开始之前**的目录和环境变量。
 
-### 5.6 默认环境变量
+### 5.6 push / pull 的实现
+
+- **数据走 stdin 和 stdout**：其他命令把驱动脚本从 ssh 的 stdin 发过去，push 和 pull 需要用 stdin、stdout 传文件，所以改成把驱动脚本以 base64 放在命令行上：`bash -c 'eval "$(printf %s "$1" | base64 -d)"' sshtab <base64>`。命令只用单引号，zsh、fish 等各种登录 shell 都不会改动它。这两个动作没有用户命令，驱动脚本编码后约 20KB，远低于单个参数 128KB 的上限。
+- **用 tar 打包**：push 时本地用 Go 标准库打包，服务器端用 `tar -x` 解到目标目录；pull 时服务器端先回一个状态行，后面跟着 `tar -c` 的输出，本地边收边解包。服务器只需要有 tar，不需要 rsync；数据不经过内存缓冲，几个 GB 的文件也不会撑爆内存。
+- **路径解析**：服务器端按窗口的当前目录解析路径（窗口还没用过时就是家目录），目录会先 `cd` 进去再 `pwd` 一下，去掉 `.`、`..` 和末尾的 `/`，这样它的 basename 就是它真正的名字。交给 tar 的名字写成 `./名字`，避免以 `-` 开头的文件名被当成选项。路径解析成 `/` 时拒绝。
+- **pull 的安全检查**：服务器发回来的压缩包不可信。文件名带 `..` 或以 `/` 开头的一律拒绝；写文件时如果路径上有符号链接也拒绝，防止压缩包先放一个指向别处的链接、再借它把文件写到目标目录之外；目标位置已经是符号链接时，先删掉链接再写，不会顺着它覆盖别的文件。
+- **tar 的警告**：pull 正在写入的日志时，GNU tar 会警告"file changed as we read it"并以 1 退出，sshtab 把它显示为 `warning:`，仍然算成功；退出码 2 及以上（比如没有读权限）算失败。
+
+### 5.7 默认环境变量
 
 每个窗口都会强制设置下面这些变量，避免命令卡住或者输出不及时：
 
@@ -327,10 +370,11 @@ PYTHONUNBUFFERED=1      # 否则 python 的输出会被缓冲，log 里长时间
 
 ```text
 main.go        入口
-cli.go         命令行解析（选项可以写在参数后面，比如 `run host cmd --wait 5s`）和五个命令
+cli.go         命令行解析（选项可以写在参数后面，比如 `run host cmd --wait 5s`）和七个命令
 ssh.go         调用系统 ssh，加上连接复用参数
 protocol.go    生成驱动脚本的输入，解析返回的状态行和截断信息
-output.go      状态头、进度条、窗口表格（按终端显示宽度对齐中文）
+output.go      状态头、进度条、窗口表格（按终端显示宽度对齐中文）、传输结果
+transfer.go    push/pull 的 tar 打包和安全解包
 driver.sh      服务器端驱动脚本，用 go:embed 打包进二进制文件，每次调用时发送
 *_test.go      cli/protocol/output 的单元测试不需要服务器（命令层用假的 ssh）；
                e2e_test.go 先编译出真正的二进制文件，再连接 pdvm（或 SSHTAB_TEST_HOST 指定的主机）
@@ -339,7 +383,7 @@ install.sh     一行安装脚本：下载最新版本的二进制文件，有 C
 skills/sshtab/SKILL.md   给 Agent 的使用说明（Claude Code skill）
 ```
 
-Go 代码约 870 行，加上驱动脚本约 310 行；测试约 1160 行。
+Go 代码约 1350 行，加上驱动脚本约 380 行；测试约 1630 行。
 
 最初的版本是用 Python 写的。改写成 Go 时 `driver.sh` 一行没动；改写完后先让原来的 Python 端到端测试去调用 Go 编译出来的二进制，全部通过，再把测试改写成 Go。
 

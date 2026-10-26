@@ -3,22 +3,34 @@ package main
 import (
 	"bytes"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 )
 
 // fakeServer answers every call with reply and records the scripts it got.
+// Streamed calls (push, pull) go to onStream.
 type fakeServer struct {
-	reply   sshReply
-	err     error
-	host    string
-	scripts []string
+	reply    sshReply
+	err      error
+	host     string
+	scripts  []string
+	onStream func(stdin io.Reader, stdout io.Writer) streamResult
 }
 
 func (f *fakeServer) call(host, script string) (sshReply, error) {
 	f.host = host
 	f.scripts = append(f.scripts, script)
 	return f.reply, f.err
+}
+
+func (f *fakeServer) stream(host, script string, stdin io.Reader, stdout io.Writer) (streamResult, error) {
+	f.host = host
+	f.scripts = append(f.scripts, script)
+	if f.onStream == nil {
+		return streamResult{}, errors.New("unexpected streamed call")
+	}
+	return f.onStream(stdin, stdout), nil
 }
 
 type cliRun struct {
@@ -33,7 +45,7 @@ func runCLI(t *testing.T, server *fakeServer, stdin string, args ...string) cliR
 		server = &fakeServer{reply: sshReply{stdout: fakeReply(replyOpts{})}}
 	}
 	var stdout, stderr bytes.Buffer
-	c := &cli{stdin: strings.NewReader(stdin), stdout: &stdout, stderr: &stderr, call: server.call}
+	c := &cli{stdin: strings.NewReader(stdin), stdout: &stdout, stderr: &stderr, call: server.call, stream: server.stream}
 	code := c.main(args)
 	return cliRun{code, stdout.String(), stderr.String(), server}
 }

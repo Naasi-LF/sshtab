@@ -8,6 +8,6 @@ import "os"
 var version = "dev"
 
 func main() {
-	c := &cli{stdin: os.Stdin, stdout: os.Stdout, stderr: os.Stderr, call: runScript}
+	c := &cli{stdin: os.Stdin, stdout: os.Stdout, stderr: os.Stderr, call: runScript, stream: streamScript}
 	os.Exit(c.main(os.Args[1:]))
 }

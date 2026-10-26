@@ -1,9 +1,14 @@
-# sshtab remote driver: fed to `bash -s` over ssh on every call, never installed.
-# sshtab prepends SSHTAB_ACTION (run, log, kill, list or close), SSHTAB_WINDOW (except
-# for list) and, depending on the action: SSHTAB_CMD_B64 (the user's command,
-# base64), SSHTAB_WAIT (seconds), SSHTAB_TAIL (a line count, or empty for "only new
-# output"), SSHTAB_FORCE (1 or empty). Optional: SSHTAB_KEEP_HEAD and SSHTAB_KEEP_TAIL,
-# the bytes kept from each end of an output stream that is too long.
+# sshtab remote driver: sent over ssh on every call, never installed. Usually
+# fed to `bash -s`; push and pull pass it on the command line instead, so that
+# stdin and stdout are free for file data.
+# sshtab prepends SSHTAB_ACTION (run, log, kill, list, close, push or pull),
+# SSHTAB_WINDOW (except for list) and, depending on the action: SSHTAB_CMD_B64
+# (the user's command, base64), SSHTAB_WAIT (seconds), SSHTAB_TAIL (a line
+# count, or empty for "only new output"), SSHTAB_FORCE (1 or empty),
+# SSHTAB_DEST_B64 (push's server directory, base64, empty for the window's),
+# SSHTAB_PATHS_B64 (pull's server paths, one per line, base64). Optional:
+# SSHTAB_KEEP_HEAD and SSHTAB_KEEP_TAIL, the bytes kept from each end of an
+# output stream that is too long.
 # Window files: DESIGN.md 5.3. Reply format: protocol.go.
 
 sshtab_sessions=~/.sshtab/sessions
@@ -13,7 +18,7 @@ trap 'rm -rf "$sshtab_tmp"' EXIT
 : >"$sshtab_tmp/stdout"
 : >"$sshtab_tmp/stderr"
 : "${SSHTAB_KEEP_HEAD:=10240}" "${SSHTAB_KEEP_TAIL:=20480}"
-sshtab_signal= sshtab_cut_stdout= sshtab_cut_stderr=
+sshtab_signal= sshtab_cut_stdout= sshtab_cut_stderr= sshtab_dest=
 
 # The window's shell: restore its saved state, run the command, save the new state.
 # The state is cwd, every shell variable (exported or not) and every function.
@@ -165,9 +170,9 @@ sshtab_b64() { printf '%s' "$1" | base64 -w0; }
 # Prints the reply: a header with status $1 and the values from sshtab_inspect,
 # then whatever stdout and stderr were collected into $sshtab_tmp.
 sshtab_reply() {
-  printf 'SSHTAB1 status=%s code=%d cwd=%s elapsed=%d cmd=%s signal=%s out_cut=%s err_cut=%s out=%d err=%d\n' \
+  printf 'SSHTAB1 status=%s code=%d cwd=%s elapsed=%d cmd=%s signal=%s dest=%s out_cut=%s err_cut=%s out=%d err=%d\n' \
     "$1" "$sshtab_code" "$(sshtab_b64 "$sshtab_cwd")" "$sshtab_elapsed" "$(sshtab_b64 "$sshtab_cmdline")" \
-    "$sshtab_signal" "$sshtab_cut_stdout" "$sshtab_cut_stderr" \
+    "$sshtab_signal" "$(sshtab_b64 "$sshtab_dest")" "$sshtab_cut_stdout" "$sshtab_cut_stderr" \
     "$(wc -c <"$sshtab_tmp/stdout")" "$(wc -c <"$sshtab_tmp/stderr")"
   cat "$sshtab_tmp/stdout" "$sshtab_tmp/stderr"
 }
@@ -300,11 +305,78 @@ sshtab_close() {
   sshtab_reply closed
 }
 
+# Sets sshtab_path to server path $1 as the window sees it: relative to its
+# directory, with ~ meaning home. Directories come back without a trailing
+# slash or "." and ".." parts, so that their basename is their real name.
+sshtab_resolve() {
+  case $1 in
+    "" | .) sshtab_path=$sshtab_cwd ;;
+    "~") sshtab_path=$HOME ;;
+    "~/"*) sshtab_path=$HOME/${1#"~/"} ;;
+    /*) sshtab_path=$1 ;;
+    *) sshtab_path=$sshtab_cwd/$1 ;;
+  esac
+  if [ -d "$sshtab_path" ] && [ ! -L "$sshtab_path" ]; then
+    sshtab_path=$(CDPATH= cd -- "$sshtab_path" && pwd) || return 1
+  fi
+}
+
+# push: unpacks the tar stream on stdin into SSHTAB_DEST_B64, by default the
+# window's directory. Works while the window is busy, and never creates it.
+sshtab_push() {
+  sshtab_inspect
+  sshtab_resolve "$(printf '%s' "$SSHTAB_DEST_B64" | base64 -d)"
+  sshtab_dest=$sshtab_path
+  if mkdir -p -- "$sshtab_dest" 2>"$sshtab_tmp/stderr" &&
+    tar -xf - -C "$sshtab_dest" 2>"$sshtab_tmp/stderr"; then
+    sshtab_reply pushed
+  else
+    sshtab_reply failed
+  fi
+}
+
+# pull: replies with a header, then a tar stream of SSHTAB_PATHS_B64 (one per
+# line), each archived under its own name like `cp -r`. If any path is
+# missing, sends no files and lists the missing paths instead.
+sshtab_pull() {
+  local p args=() missing=()
+  sshtab_inspect
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    if ! sshtab_resolve "$p" || { [ ! -e "$sshtab_path" ] && [ ! -L "$sshtab_path" ]; }; then
+      missing+=("$p")
+    elif [ "$sshtab_path" = / ]; then
+      echo "refusing to pull / (the whole filesystem)" >"$sshtab_tmp/stderr"
+      sshtab_reply failed
+      return
+    else
+      # "./name" so that a name starting with "-" is not read as an option.
+      args+=(-C "$(dirname -- "$sshtab_path")" "./$(basename -- "$sshtab_path")")
+    fi
+  # The echo ends the last line: `read` drops a final line without a newline.
+  done < <(printf '%s' "$SSHTAB_PATHS_B64" | base64 -d; echo)
+  if [ ${#missing[@]} -gt 0 ]; then
+    printf '%s\n' "${missing[@]}" >"$sshtab_tmp/stdout"
+    sshtab_reply missing
+    return
+  fi
+  if [ ${#args[@]} -eq 0 ]; then
+    echo "no paths to pull" >"$sshtab_tmp/stderr"
+    sshtab_reply failed
+    return
+  fi
+  sshtab_reply pulled
+  # tar's own warnings, e.g. a log file that grew while being read, go to stderr.
+  tar -cf - "${args[@]}"
+}
+
 case $SSHTAB_ACTION in
   run) sshtab_run ;;
   log) sshtab_log ;;
   kill) sshtab_kill ;;
   list) sshtab_list ;;
   close) sshtab_close ;;
+  push) sshtab_push ;;
+  pull) sshtab_pull ;;
   *) echo "sshtab driver: unknown action $SSHTAB_ACTION" >&2; exit 1 ;;
 esac

@@ -40,6 +40,7 @@ The loss was blowing up, so the agent hit Ctrl-C. The window still remembers the
 | One `cat` of a log can flood the agent's context | Output over 30KB is cut **on the server** to its head and tail |
 | Nested quotes are easy to get wrong | Commands are sent encoded: quote once, as in your own terminal |
 | A new connection per command | One reused connection: about 0.1s per command |
+| `scp`/`rsync` paths start from the home directory, not where you `cd`'d | `push`/`pull` paths start from the window's directory, over the same connection |
 
 ## Install
 
@@ -65,6 +66,8 @@ sshtab log      host[/window] [--tail N]               output you have not seen 
 sshtab kill     host[/window]                          Ctrl-C, then SIGTERM, then SIGKILL
 sshtab sessions host                                   list windows
 sshtab close    host[/window] [--force]                delete a window
+sshtab push     host[/window] path... [--to DIR]       copy local files into the window's directory
+sshtab pull     host[/window] path... [--to DIR]       copy files from the window's directory to here
 ```
 
 `host` alone means the window `host/main`. A window is created the first time you use its name.
@@ -93,6 +96,23 @@ sshtab's own errors (connection, busy window, bad arguments) exit 255, like ssh.
 
 `sshtab kill` sends Ctrl-C to the whole process group, so Python gets a `KeyboardInterrupt` and a training script can save a checkpoint. If that does not work, it escalates to SIGTERM and then SIGKILL, 5 seconds apart.
 
+### Moving files
+
+```text
+$ sshtab push gpu1/iris iris.csv train.py
+[pushed 2 files, 6.6 KB · gpu1/iris · /home/me/iris]
+  iris.csv
+  train.py
+
+$ sshtab run gpu1/iris 'python3 train.py'
+$ sshtab pull gpu1/iris results
+[pulled 2 files, 785 bytes · gpu1/iris · /home/me/iris]
+  results/metrics.json
+  results/model.json
+```
+
+Server paths are relative to the window's directory (`~/…` and absolute paths work too); `--to` picks another destination, created if needed. Files and directories keep their names, like `cp -r`, with permissions, modification times and symlinks. Transfers work while the window is busy, so you can pull a checkpoint mid-training. They are tar streams over the same SSH connection, so the server needs nothing but `tar`. A pull never writes outside its destination, whatever the server sends. Each transfer is a full copy: for big trees you update often, `rsync` is still the better tool.
+
 ### Big output
 
 stdout and stderr are each cut to their first ~10KB and last ~20KB when longer than 30KB, at line breaks, with a marker in between:
@@ -110,7 +130,7 @@ This happens on the server, so that 75MB reply takes half a second and sends 31K
 
 ## Limits
 
-- Linux servers only, with bash, coreutils and `flock` (util-linux). Tested on Ubuntu 24.04 with bash 5.2.
+- Linux servers only, with bash, coreutils, `tar` and `flock` (util-linux). Tested on Ubuntu 24.04 with bash 5.2.
 - No interactive programs: no `vim`, `top` or password prompts. Use `cat -n`, `top -bn1`, `sudo -n`.
 - Aliases and shell options like `set -e` are not remembered between commands.
 - `conda activate` has not been tested yet.

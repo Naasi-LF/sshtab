@@ -40,6 +40,7 @@ loss 在发散，所以 Agent 按了 Ctrl-C。窗口仍然记得当前目录和�
 | 一次 `cat` 日志就可能撑爆 Agent 的上下文 | 超过 30KB 的输出在**服务器端**截断，只保留开头和结尾 |
 | 引号嵌套很容易写错 | 命令经过编码后传输，像在自己终端里一样只需要加一层引号 |
 | 每条命令都重新建立连接 | 复用同一个连接，每条命令约 0.1 秒 |
+| `scp`、`rsync` 的路径从家目录算起，和你 `cd` 到的地方对不上 | `push`、`pull` 的路径从窗口的当前目录算起，走的也是同一个连接 |
 
 ## 安装
 
@@ -65,6 +66,8 @@ sshtab log      host[/window] [--tail N]               查看还没看过的输�
 sshtab kill     host[/window]                          Ctrl-C，然后 SIGTERM，再然后 SIGKILL
 sshtab sessions host                                   列出所有窗口
 sshtab close    host[/window] [--force]                删除窗口
+sshtab push     host[/window] path... [--to DIR]       把本地文件传到窗口的当前目录
+sshtab pull     host[/window] path... [--to DIR]       把窗口当前目录里的文件拿回本地
 ```
 
 只写 `host` 时，指的是窗口 `host/main`。第一次用到某个窗口名时，会自动新建这个窗口。
@@ -93,6 +96,23 @@ sshtab 自己的错误（连接失败、窗口正忙、参数错误）返回 255
 
 `sshtab kill` 会对整个进程组发送 Ctrl-C，所以 python 会收到 `KeyboardInterrupt`，训练脚本可以借机保存 checkpoint。如果这样停不下来，会依次升级为 SIGTERM 和 SIGKILL，每次间隔 5 秒。
 
+### 传文件
+
+```text
+$ sshtab push gpu1/iris iris.csv train.py
+[pushed 2 files, 6.6 KB · gpu1/iris · /home/me/iris]
+  iris.csv
+  train.py
+
+$ sshtab run gpu1/iris 'python3 train.py'
+$ sshtab pull gpu1/iris results
+[pulled 2 files, 785 bytes · gpu1/iris · /home/me/iris]
+  results/metrics.json
+  results/model.json
+```
+
+服务器上的路径从窗口的当前目录算起（也可以写 `~/…` 或绝对路径）；`--to` 可以指定别的目标目录，不存在会自动创建。文件和目录保留原来的名字，和 `cp -r` 一样，权限、修改时间和符号链接都会保留。窗口正忙时也能传，所以训练跑到一半时可以随时拉一份 checkpoint 回来。传输用的是 tar，走同一个 SSH 连接，服务器上只需要有 `tar`。不管服务器发回来什么，pull 都不会写到目标目录之外。每次传输都是完整复制：需要反复同步的大量文件，还是 `rsync` 更合适。
+
 ### 大量输出
 
 stdout 和 stderr 各自超过 30KB 时，只保留开头约 10KB 和结尾约 20KB，截断点在换行处，中间放一行省略标记：
@@ -110,7 +130,7 @@ $ sshtab run gpu1 'seq 1 10000000'
 
 ## 限制
 
-- 只支持 Linux 服务器，需要 bash、coreutils 和 `flock`（util-linux）。已在 Ubuntu 24.04 + bash 5.2 上测试过。
+- 只支持 Linux 服务器，需要 bash、coreutils、`tar` 和 `flock`（util-linux）。已在 Ubuntu 24.04 + bash 5.2 上测试过。
 - 不支持交互式程序：不能用 `vim`、`top`，也不能输入密码。可以改用 `cat -n`、`top -bn1`、`sudo -n`。
 - 不会记住 alias，也不会记住 `set -e` 这类 shell 选项。
 - `conda activate` 还没有测试过。

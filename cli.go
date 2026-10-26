@@ -3,9 +3,13 @@ package main
 // Command-line entry point: parses `sshtab <command> <host[/window]> ...`.
 
 import (
+	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -68,9 +72,13 @@ type flagSpec struct {
 
 type commandSpec struct {
 	name        string
-	positionals []string // all required
+	positionals []string // all required; a last name ending in "..." takes one or more
 	flags       []flagSpec
 	help        string
+}
+
+func (s commandSpec) variadic() bool {
+	return strings.HasSuffix(s.positionals[len(s.positionals)-1], "...")
 }
 
 var commands = []commandSpec{
@@ -87,6 +95,13 @@ var commands = []commandSpec{
 	{"close", []string{"host[/window]"}, []flagSpec{
 		{"force", "", "stop its command first if running"},
 	}, "delete a window and its state"},
+	{"push", []string{"host[/window]", "path..."}, []flagSpec{
+		{"to", "DIR", "server directory to copy into, relative to the window's directory\n" +
+			"(quote ~ so your local shell leaves it alone); default: the window's directory"},
+	}, "copy local files or directories to the server, into the window's directory"},
+	{"pull", []string{"host[/window]", "path..."}, []flagSpec{
+		{"to", "DIR", "local directory to copy into; default: the current directory"},
+	}, "copy server files or directories, relative to the window's directory, to here"},
 }
 
 func (s commandSpec) usage() string {
@@ -181,17 +196,19 @@ func (s commandSpec) parseArgs(args []string) ([]string, map[string]string, erro
 	if len(positionals) < len(s.positionals) {
 		return nil, nil, fmt.Errorf("missing argument: %s", s.positionals[len(positionals)])
 	}
-	if len(positionals) > len(s.positionals) {
+	if len(positionals) > len(s.positionals) && !s.variadic() {
 		return nil, nil, fmt.Errorf("unexpected argument: %q", positionals[len(s.positionals)])
 	}
 	return positionals, flags, nil
 }
 
-// cli runs one sshtab invocation. call talks to the server; tests replace it.
+// cli runs one sshtab invocation. call and stream talk to the server; tests
+// replace them.
 type cli struct {
 	stdin          io.Reader
 	stdout, stderr io.Writer
 	call           func(host, script string) (sshReply, error)
+	stream         func(host, script string, stdin io.Reader, stdout io.Writer) (streamResult, error)
 }
 
 func (c *cli) main(args []string) int {
@@ -252,6 +269,10 @@ func (c *cli) main(args []string) int {
 			return c.fail("sessions takes a host, not a window: try `sshtab sessions " + t.host + "`")
 		}
 		return c.sessions(t.host)
+	case "push":
+		return c.push(t, positionals[1:], flags["to"])
+	case "pull":
+		return c.pull(t, positionals[1:], flags["to"])
 	default:
 		return c.close(t, flags["force"] != "")
 	}
@@ -345,6 +366,142 @@ func (c *cli) close(t target, force bool) int {
 	return 0
 }
 
+// errTransferOver stops packing files once ssh has finished, e.g. after the
+// server refused the push.
+var errTransferOver = errors.New("transfer over")
+
+func (c *cli) push(t target, sources []string, to string) int {
+	var missing []string
+	for _, s := range sources {
+		if _, err := os.Lstat(s); err != nil {
+			missing = append(missing, s)
+		} else if abs, _ := filepath.Abs(s); abs == "/" {
+			return c.fail("refusing to push / (the whole filesystem)")
+		}
+	}
+	if len(missing) > 0 {
+		return c.fail("no such local file: " + strings.Join(missing, ", "))
+	}
+	if strings.Contains(to, "\n") {
+		return c.fail("--to: a path cannot contain a newline")
+	}
+
+	archive, archiveWriter := io.Pipe()
+	type packed struct {
+		sent transferred
+		err  error
+	}
+	packing := make(chan packed, 1)
+	go func() {
+		sent, err := writeTar(archiveWriter, sources)
+		archiveWriter.CloseWithError(err)
+		packing <- packed{sent, err}
+	}()
+	var reply bytes.Buffer
+	res, err := c.stream(t.host, buildScript("push", t.window, param{"dest_b64", encodeCommand(to)}), archive, &reply)
+	archive.CloseWithError(errTransferOver) // unblocks the packer if ssh quit early
+	p := <-packing
+	if err != nil {
+		return c.fail("cannot run ssh: " + err.Error())
+	}
+	if p.err != nil && !errors.Is(p.err, errTransferOver) {
+		return c.fail("reading local files: " + p.err.Error())
+	}
+	r, err := parseReply(reply.Bytes())
+	if err != nil {
+		return c.fail(fmt.Sprintf("cannot run on %s: %s", t.host, sshDetail(res.stderr)))
+	}
+	if r.status != "pushed" {
+		return c.fail(fmt.Sprintf("push to %s failed: %s%s", t, strings.TrimSpace(r.stderr), localHomeHint([]string{to})))
+	}
+	into := ""
+	if r.dest != r.cwd {
+		into = r.dest
+	}
+	fmt.Fprint(c.stdout, renderTransfer("pushed", p.sent, t.String(), r.cwd, into))
+	return 0
+}
+
+func (c *cli) pull(t target, paths []string, to string) int {
+	for _, p := range append([]string{to}, paths...) {
+		if strings.Contains(p, "\n") {
+			return c.fail("a path cannot contain a newline")
+		}
+	}
+	dest := to
+	if dest == "" {
+		dest = "."
+	}
+
+	data, dataWriter := io.Pipe()
+	type unpacked struct {
+		r   result
+		got transferred
+		err error // problem with the reply
+		bad error // problem writing local files
+	}
+	unpacking := make(chan unpacked, 1)
+	go func() {
+		var u unpacked
+		br := bufio.NewReader(data)
+		if u.r, u.err = readReply(br); u.err == nil && u.r.status == "pulled" {
+			u.got, u.bad = extractTar(br, dest)
+		}
+		io.Copy(io.Discard, br) // keep ssh flowing even if we stopped early
+		unpacking <- u
+	}()
+	script := buildScript("pull", t.window, param{"paths_b64", encodeCommand(strings.Join(paths, "\n"))})
+	res, err := c.stream(t.host, script, strings.NewReader(""), dataWriter)
+	dataWriter.Close()
+	u := <-unpacking
+	switch {
+	case err != nil:
+		return c.fail("cannot run ssh: " + err.Error())
+	case u.err != nil:
+		return c.fail(fmt.Sprintf("cannot run on %s: %s", t.host, sshDetail(res.stderr)))
+	case u.r.status == "missing":
+		return c.fail(fmt.Sprintf("no such file on %s: %s%s", t, strings.Join(splitLines(u.r.stdout), ", "),
+			localHomeHint(paths)))
+	case u.r.status != "pulled":
+		return c.fail(fmt.Sprintf("pull from %s failed: %s", t, strings.TrimSpace(u.r.stderr)))
+	case u.bad != nil:
+		return c.fail("writing local files: " + u.bad.Error())
+	}
+	// tar exits 1 for warnings such as a log that grew while being read; 2 and
+	// up means some files could not be read at all.
+	if warning := strings.TrimSpace(text(res.stderr)); warning != "" || res.code != 0 {
+		if res.code >= 2 {
+			return c.fail(fmt.Sprintf("some files could not be read on %s: %s", t.host, warning))
+		}
+		fmt.Fprintf(c.stderr, "warning: %s\n", warning)
+	}
+	fmt.Fprint(c.stdout, renderTransfer("pulled", u.got, t.String(), u.r.cwd, to))
+	return 0
+}
+
+// localHomeHint explains a classic mistake: an unquoted ~ that the local shell
+// expanded into a local path before sshtab saw it.
+func localHomeHint(paths []string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	for _, p := range paths {
+		if strings.HasPrefix(p, home+"/") {
+			return fmt.Sprintf("\nhint: %s is a local path: your shell turned ~ into %s. "+
+				"Quote server paths that start with ~, e.g. '~/data'", p, home)
+		}
+	}
+	return ""
+}
+
+func sshDetail(stderr []byte) string {
+	if detail := strings.TrimSpace(text(stderr)); detail != "" {
+		return detail
+	}
+	return "no response from remote driver"
+}
+
 func busy(t target, r result) string {
 	return fmt.Sprintf("%s is busy (%s, %s)", t, r.cmd, formatDuration(r.elapsed))
 }
@@ -358,11 +515,7 @@ func (c *cli) request(host, script string) (result, bool) {
 	}
 	r, err := parseReply(reply.stdout)
 	if err != nil {
-		detail := strings.TrimSpace(text(reply.stderr))
-		if detail == "" {
-			detail = "no response from remote driver"
-		}
-		c.fail(fmt.Sprintf("cannot run on %s: %s", host, detail))
+		c.fail(fmt.Sprintf("cannot run on %s: %s", host, sshDetail(reply.stderr)))
 		return result{}, false
 	}
 	return r, true

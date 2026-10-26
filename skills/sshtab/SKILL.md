@@ -1,6 +1,6 @@
 ---
 name: sshtab
-description: Work on a remote Linux server over SSH with sshtab, a remote shell built for agents. Windows keep their directory, environment variables and activated venv between commands, long commands keep running in their window, and output is kept small. Use it whenever commands, files or jobs (builds, servers, GPU training) live on a remote host, instead of plain `ssh host cmd`.
+description: Work on a remote Linux server over SSH with sshtab, a remote shell built for agents. Windows keep their directory, environment variables and activated venv between commands, long commands keep running in their window, output is kept small, and files move with push/pull. Use it whenever commands, files or jobs (builds, servers, GPU training) live on a remote host, instead of plain `ssh host cmd`.
 ---
 
 # sshtab: a remote shell for agents
@@ -13,6 +13,8 @@ sshtab run  gpu1/train 'cd ~/proj && source .venv/bin/activate'   # remembered b
 sshtab run  gpu1/train 'python train.py'                          # still in ~/proj, venv active
 sshtab log  gpu1/train                                            # new output since you last looked
 sshtab kill gpu1/train                                            # Ctrl-C
+sshtab push gpu1/train data.csv configs/                          # local → the window's directory
+sshtab pull gpu1/train results/ --to ./results-gpu1               # the window's directory → local
 sshtab sessions gpu1                                              # list windows
 sshtab close gpu1/train                                           # delete the window
 ```
@@ -102,7 +104,23 @@ CMD
 ```
 
 - Small edits: `sed -i 's/^lr = .*/lr = 3e-4/' train.py`, or a short `python3 - <<'EOF' … EOF` that replaces an exact string. Check the result with `grep -n` or `sed -n` afterwards.
-- Copy files with `scp` or `rsync` from your own shell, not through sshtab.
+
+## Moving files between here and the server
+
+```bash
+sshtab push gpu1/train iris.csv train.py            # into the window's directory
+sshtab push gpu1/train configs/ --to runs/exp1      # into runs/exp1/configs/ (created if needed)
+sshtab pull gpu1/train results/ train.log           # into the local current directory
+sshtab pull gpu1/train ckpt/best.pt --to ./ckpts    # into ./ckpts/best.pt
+```
+
+- Server paths, in `push --to` and in `pull`, are relative to the **window's directory**, like in `sshtab run`; `~/…` and absolute paths work too. Local paths are relative to your own current directory.
+- Each file or directory arrives under its own name, directories recursively, like `cp -r`. Existing files are overwritten. Missing destination directories are created. Permissions and modification times are kept; symlinks are copied as links.
+- The reply lists what moved: `[pulled 2 files, 785 bytes · gpu1/train · /home/me/proj]`. If any source is missing, nothing is copied and the error names it.
+- Works while the window is busy: pull a checkpoint or log while training runs. A growing log may give a harmless `warning: … file changed as we read it`.
+- Quote server paths that start with `~` (`'~/data'`), or your local shell turns them into local paths before sshtab sees them.
+- No wildcards: pull the directory instead of `logs/*.txt`.
+- Every transfer is a full copy. For large trees you update repeatedly, or multi-GB files over a slow link, `rsync -a` from your own shell is better: it only sends changes and can resume. Its server paths are relative to the home directory, not the window's.
 
 ## Quoting
 
