@@ -31,10 +31,11 @@ class Result:
     stderr: str
 
 
-def build_script(command: str) -> str:
+def build_script(command: str, window: str) -> str:
+    """`window` must already be validated (cli.WINDOW_RE): it is pasted into bash."""
     encoded = base64.b64encode(command.encode()).decode()
     driver = resources.files("arc").joinpath("driver.sh").read_text()
-    return f"ARC_CMD_B64={encoded}\n{driver}"
+    return f"ARC_CMD_B64={encoded}\nARC_WINDOW={window}\n{driver}"
 
 
 def parse(raw: bytes) -> Result:

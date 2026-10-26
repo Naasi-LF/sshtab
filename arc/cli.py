@@ -67,7 +67,7 @@ def main(argv: list[str] | None = None) -> int:
 def cmd_run(target: Target, command: str) -> int:
     if command == "-":
         command = sys.stdin.read()
-    proc = ssh.run_script(target.host, protocol.build_script(command))
+    proc = ssh.run_script(target.host, protocol.build_script(command, target.window))
     try:
         result = protocol.parse(proc.stdout)
     except protocol.ProtocolError:

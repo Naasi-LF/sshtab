@@ -54,9 +54,10 @@ class ProtocolTest(unittest.TestCase):
                 protocol.parse(raw)
 
     def test_build_script_encodes_command(self):
-        script = protocol.build_script("echo \"it's\" $HOME")
-        first = script.splitlines()[0]
+        script = protocol.build_script("echo \"it's\" $HOME", "train")
+        first, second = script.splitlines()[:2]
         self.assertEqual(base64.b64decode(first.split("=", 1)[1]).decode(), "echo \"it's\" $HOME")
+        self.assertEqual(second, "ARC_WINDOW=train")
         self.assertIn("ARC1 status=exit", script)
 
 

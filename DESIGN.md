@@ -38,6 +38,17 @@
 - 一个窗口同一时间只能跑一条命令；正在跑的窗口是"忙碌"的，就像真终端一样
 - 长命令不需要"后台"的概念：没跑完的命令就留在它的窗口里继续跑
 
+### 窗口记住什么
+
+| 记住 | 不记住 |
+|---|---|
+| 当前目录（包括 `cd -` 要回到的目录） | alias（非交互 shell 里本来就不展开） |
+| 所有 shell 变量，不管有没有 export，也包括数组 | `set -e` 这类 shell 选项 |
+| `unset` 掉的变量（之后也保持 unset） | 用 `&` 放到后台的进程 |
+| 所有 shell 函数（比如 venv 的 `deactivate`） | 被 SIGKILL 杀掉的命令所做的改动 |
+
+所以 `source .venv/bin/activate` 之后，venv 会一直有效，`deactivate` 也能正常用，和真终端一样。
+
 主机名直接使用 `~/.ssh/config` 里的 Host 别名，所以跳板机、密钥等配置都沿用 SSH 自己的。
 
 窗口名规则：字母、数字、`_`、`-`，最长 32 个字符。
@@ -199,7 +210,8 @@ hint: ...              ← 只在需要提示下一步时出现
 ```text
 ~/.arc/sessions/<窗口>/
   cwd          当前目录
-  env.sh       环境变量（`export -p` 的输出，可以直接 source）
+  vars.sh      所有 shell 变量（逐个 `declare -p` 的输出，可以直接 source）
+  funcs.sh     所有 shell 函数（`declare -f` 的输出）
   lock/        加锁用的目录（mkdir 是原子操作）
   pid          正在跑的命令的进程组号；空闲时不存在
   cmd          正在跑或最后一次跑的命令
@@ -215,13 +227,18 @@ hint: ...              ← 只在需要提示下一步时出现
 1. **本地**：执行 `ssh <参数> <主机> 'bash -s'`，把驱动脚本从 ssh 的 stdin 发过去；用户命令以 base64 编码后放在脚本开头。这样用户命令里有什么引号都不需要转义，也不受命令行参数长度的限制（Linux 单个参数最长约 128KB）。显式使用 `bash`，是因为服务器上的登录 shell 可能是 zsh 或 fish。
 2. **加锁**：`mkdir lock`，防止两个 `run` 同时操作同一个窗口。
 3. **检查是否忙碌**：存在 `pid` 并且进程还活着，就报"窗口正忙"并退出。
-4. **启动命令**：用 `setsid` 在新的进程组里启动，stdin 接 `/dev/null`，stdout 和 stderr 分别写入文件。子 shell 里依次执行：
+4. **启动命令**：用 `setsid` 在新的进程组里启动，stdin 接 `/dev/null`，stdout 和 stderr 分别写入文件。窗口的 shell 里依次执行：
    ```sh
-   cd "$(cat cwd)"; . ./env.sh             # 恢复窗口状态
-   trap 'pwd > cwd.new; export -p > env.new; mv cwd.new cwd; mv env.new env.sh' EXIT
+   . vars.sh; . funcs.sh                    # 恢复变量和函数
+   export PAGER=cat ...                     # 强制非交互设置（见 5.6）
+   cd "$(<cwd)"                             # 恢复目录；目录被删了就回到家目录并提示
+   trap '保存 cwd、vars.sh、funcs.sh' EXIT
    eval "$用户命令"                          # 执行
    ```
-   用 `trap EXIT` 来保存状态，这样即使用户命令里写了 `exit 3`，状态也会保存。写入退出码的步骤也放在这里。
+   - 用 `trap EXIT` 来保存状态，这样即使用户命令里写了 `exit 3`，状态也会保存。写入退出码的步骤也放在这里。
+   - 窗口一旦有了保存的状态，就用 `env -i` 从空环境启动、完全靠 `vars.sh` 恢复，这样被 `unset` 的变量不会因为 ssh 登录环境里有它而又冒出来。新窗口则继承 ssh 的登录环境。
+   - arc 自己用到的变量都以 `__arc_` 开头，保存时跳过；bash 内部的变量（`PPID`、`RANDOM`、`SHLVL` 等）和每次连接都会变的 `SSH_*` 也跳过。
+   - 用户命令写在临时文件里传给窗口的 shell，而不是放在环境变量里，因为单个环境变量同样有约 128KB 的长度限制。
 5. **解锁**，然后**等待**：每 0.1 秒检查一次是否已经有 `exit` 文件，最多等 `--wait` 秒。
 6. **返回结果**：第一行输出一个机器可读的状态行，本地 arc 解析后再格式化成状态头；接着输出截断后的 stdout 和 stderr，并更新 `offset`。
 
@@ -288,5 +305,5 @@ README.md
 ## 8. 待定和待验证
 
 - **名字**：`arc` 需要换掉。
-- **conda**：conda 的初始化代码一般写在 `.bashrc` 里，而非交互式 shell 可能不会加载 `.bashrc`，所以 `conda activate` 有可能失效。需要在 pdvm 上验证，必要时让新窗口以登录 shell 的方式初始化。
+- **conda**：conda 的初始化代码一般写在 `.bashrc` 里，而非交互式 shell 可能不会加载 `.bashrc`，所以新窗口里可能没有 `conda` 命令。由于窗口会记住函数，在窗口里执行一次 `eval "$(conda shell.bash hook)"` 之后应该就能一直用 `conda activate`。pdvm 上没有装 conda，需要找一台装了 conda 的机器验证。
 - **退出码 75**：用来表示"还在跑"是否合适，等 Agent 实际用起来再看。
