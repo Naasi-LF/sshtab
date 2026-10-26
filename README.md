@@ -43,23 +43,19 @@ The loss was blowing up, so the agent hit Ctrl-C. The window still remembers the
 
 ## Install
 
-You need Python 3.9+ and OpenSSH on your machine, and key-based SSH access to a Linux server with bash.
+sshtab is a single binary for macOS and Linux (Intel or ARM). On your machine it only needs OpenSSH; on the server, bash and key-based SSH access.
 
 ```bash
-uv tool install git+https://github.com/Naasi-LF/sshtab
+curl -fsSL https://raw.githubusercontent.com/Naasi-LF/sshtab/main/install.sh | sh
 ```
 
-(or `pipx install git+https://github.com/Naasi-LF/sshtab`). Hosts are the names in your `~/.ssh/config`, so jump hosts, keys and ports work as usual. sshtab never asks for passwords.
+This puts `sshtab` in `~/.local/bin` (set `SSHTAB_INSTALL_DIR` to change that) and tells you if that directory is not on your PATH yet. Run it again to upgrade; delete the file to uninstall. You can also download an archive from [Releases](https://github.com/Naasi-LF/sshtab/releases) yourself, or build from source with `go install github.com/Naasi-LF/sshtab@latest`.
+
+Hosts are the names in your `~/.ssh/config`, so jump hosts, keys and ports work as usual. sshtab never asks for passwords.
 
 ### Teach your agent
 
-For Claude Code, install the skill. It explains windows, long commands, output limits and how to edit files on the server:
-
-```bash
-mkdir -p ~/.claude/skills/sshtab && curl -fsSL https://raw.githubusercontent.com/Naasi-LF/sshtab/main/skills/sshtab/SKILL.md -o ~/.claude/skills/sshtab/SKILL.md
-```
-
-Other agents can be given the same file, [skills/sshtab/SKILL.md](skills/sshtab/SKILL.md), as instructions.
+If you use Claude Code (`~/.claude` exists), the installer also installs the sshtab skill to `~/.claude/skills/sshtab/SKILL.md` (skip it with `SSHTAB_NO_SKILL=1`). The skill explains windows, long commands, output limits and how to edit files on the server. Other agents can be given the same file, [skills/sshtab/SKILL.md](skills/sshtab/SKILL.md), as instructions.
 
 ## Commands
 
@@ -125,8 +121,14 @@ Each call runs one `ssh host bash -s` over a shared ControlMaster connection and
 
 ## Development
 
+sshtab is written in Go with no dependencies beyond the standard library. The server-side logic is a bash script, [driver.sh](driver.sh), embedded in the binary.
+
 ```bash
-python3 -m unittest discover -s tests
+go build -o bin/sshtab .   # build
+go test -short ./...       # unit tests, no server needed
+go test ./...              # plus end-to-end tests against a real server
 ```
 
-The end-to-end tests run against the SSH host `pdvm`, or the one named in `SSHTAB_TEST_HOST`, and are skipped if it is unreachable. They create and delete their own windows.
+The end-to-end tests build the binary and run it against the SSH host `pdvm`, or the one named in `SSHTAB_TEST_HOST`; they are skipped if it is unreachable. They create and delete their own windows.
+
+To release, push a version tag (`git tag v0.1.0 && git push origin v0.1.0`). GitHub Actions then builds the four binaries with GoReleaser and publishes them on the Releases page, where `install.sh` finds them.

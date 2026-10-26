@@ -43,23 +43,19 @@ loss 在发散，所以 Agent 按了 Ctrl-C。窗口仍然记得当前目录和�
 
 ## 安装
 
-本机需要 Python 3.9+ 和 OpenSSH，并且能用密钥登录一台装有 bash 的 Linux 服务器。
+sshtab 是一个独立的二进制文件，支持 macOS 和 Linux（Intel 和 ARM 都可以）。本机只需要 OpenSSH；服务器上只需要 bash，并且能用密钥登录。
 
 ```bash
-uv tool install git+https://github.com/Naasi-LF/sshtab
+curl -fsSL https://raw.githubusercontent.com/Naasi-LF/sshtab/main/install.sh | sh
 ```
 
-（也可以用 `pipx install git+https://github.com/Naasi-LF/sshtab`。）主机名就是你 `~/.ssh/config` 里的名字，跳板机、密钥、端口都照常生效。sshtab 永远不会要求输入密码。
+这条命令会把 `sshtab` 装到 `~/.local/bin`（想换位置可以设置 `SSHTAB_INSTALL_DIR`）；如果这个目录还不在 PATH 里，它会告诉你怎么加。升级就再运行一次，卸载就删掉这个文件。也可以自己去 [Releases](https://github.com/Naasi-LF/sshtab/releases) 下载压缩包，或者用 `go install github.com/Naasi-LF/sshtab@latest` 从源码编译。
+
+主机名就是你 `~/.ssh/config` 里的名字，跳板机、密钥、端口都照常生效。sshtab 永远不会要求输入密码。
 
 ### 教会你的 Agent
 
-Claude Code 用户可以安装这个 skill。它会告诉 Agent 窗口怎么用、长命令怎么处理、输出上限是多少，以及怎么修改服务器上的文件：
-
-```bash
-mkdir -p ~/.claude/skills/sshtab && curl -fsSL https://raw.githubusercontent.com/Naasi-LF/sshtab/main/skills/sshtab/SKILL.md -o ~/.claude/skills/sshtab/SKILL.md
-```
-
-其他 Agent 也可以直接把这份 [skills/sshtab/SKILL.md](skills/sshtab/SKILL.md) 当作使用说明。
+如果你用 Claude Code（也就是存在 `~/.claude` 目录），安装脚本会顺便把 sshtab 的 skill 装到 `~/.claude/skills/sshtab/SKILL.md`（不想装可以设置 `SSHTAB_NO_SKILL=1`）。它会告诉 Agent 窗口怎么用、长命令怎么处理、输出上限是多少，以及怎么修改服务器上的文件。其他 Agent 也可以直接把这份 [skills/sshtab/SKILL.md](skills/sshtab/SKILL.md) 当作使用说明。
 
 ## 命令
 
@@ -125,8 +121,14 @@ $ sshtab run gpu1 'seq 1 10000000'
 
 ## 开发
 
+sshtab 用 Go 编写，只用了标准库，没有第三方依赖。服务器端的逻辑是一个 bash 脚本 [driver.sh](driver.sh)，打包在二进制文件里。
+
 ```bash
-python3 -m unittest discover -s tests
+go build -o bin/sshtab .   # 编译
+go test -short ./...       # 单元测试，不需要服务器
+go test ./...              # 再加上连接真实服务器的端到端测试
 ```
 
-端到端测试会连接名为 `pdvm` 的 SSH 主机，也可以用 `SSHTAB_TEST_HOST` 指定其他主机；连不上时这些测试会自动跳过。测试会自己创建并删除所用的窗口。
+端到端测试会先编译出二进制文件，再连接名为 `pdvm` 的 SSH 主机，也可以用 `SSHTAB_TEST_HOST` 指定其他主机；连不上时这些测试会自动跳过。测试会自己创建并删除所用的窗口。
+
+发布新版本时，推送一个版本标签（`git tag v0.1.0 && git push origin v0.1.0`）。GitHub Actions 会用 GoReleaser 编译出四个平台的二进制文件，发布到 Releases 页面，`install.sh` 就是从那里下载的。

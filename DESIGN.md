@@ -223,8 +223,8 @@ hint: output truncated. In full: ~/.sshtab/sessions/main/stdout on the server, u
 ```text
    本地                                  服务器
  ┌──────────┐   系统 ssh（连接复用）   ┌──────────────────────────┐
- │ sshtab      │ ───────────────────────▶ │ 驱动脚本 (bash)           │
- │ (Python) │                          │  ├ 检查 / 加锁            │
+ │ sshtab   │ ───────────────────────▶ │ 驱动脚本 (bash)           │
+ │ (Go)     │                          │  ├ 检查 / 加锁            │
  │          │ ◀─────────────────────── │  ├ 启动命令（独立进程组） │
  │ 格式化    │   状态行 + 截断后的输出  │  ├ 等待最多 --wait        │
  └──────────┘                          │  └ 读输出、截断、返回      │
@@ -323,23 +323,25 @@ PYTHONUNBUFFERED=1      # 否则 python 的输出会被缓冲，log 里长时间
 
 ## 6. 代码结构
 
-只用 Python 标准库，没有第三方依赖，要求 Python ≥ 3.9。
+用 Go 编写，只用标准库，没有第三方依赖。编译出来是一个独立的二进制文件，用户那边什么都不用装（本机只需要 OpenSSH）。
 
 ```text
-sshtab/
-  cli.py        命令行解析，把 主机/窗口 拆开
-  ssh.py        调用 ssh，加上连接复用参数
-  driver.sh     服务器端驱动脚本（每次调用时编码后发送）
-  protocol.py   生成驱动脚本的输入，解析返回的状态行
-  output.py     格式化状态头和提示
-tests/
-  test_local.py   不需要服务器的测试：解析、协议、格式化
-  test_remote.py  集成测试，直接连接 pdvm（或 SSHTAB_TEST_HOST 指定的主机）
+main.go        入口
+cli.go         命令行解析（选项可以写在参数后面，比如 `run host cmd --wait 5s`）和五个命令
+ssh.go         调用系统 ssh，加上连接复用参数
+protocol.go    生成驱动脚本的输入，解析返回的状态行和截断信息
+output.go      状态头、进度条、窗口表格（按终端显示宽度对齐中文）
+driver.sh      服务器端驱动脚本，用 go:embed 打包进二进制文件，每次调用时发送
+*_test.go      cli/protocol/output 的单元测试不需要服务器（命令层用假的 ssh）；
+               e2e_test.go 先编译出真正的二进制文件，再连接 pdvm（或 SSHTAB_TEST_HOST 指定的主机）
+install.sh     一行安装脚本：下载最新版本的二进制文件，有 Claude Code 时顺便装上 skill
+.goreleaser.yaml、.github/workflows/   打 v* 标签时自动编译并发布 macOS/Linux × amd64/arm64 四个版本
 skills/sshtab/SKILL.md   给 Agent 的使用说明（Claude Code skill）
-DESIGN.md
 ```
 
-代码约 800 行（其中驱动脚本约 300 行），测试约 600 行。
+Go 代码约 870 行，加上驱动脚本约 310 行；测试约 1160 行。
+
+最初的版本是用 Python 写的。改写成 Go 时 `driver.sh` 一行没动；改写完后先让原来的 Python 端到端测试去调用 Go 编译出来的二进制，全部通过，再把测试改写成 Go。
 
 ---
 

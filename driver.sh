@@ -4,7 +4,7 @@
 # base64), SSHTAB_WAIT (seconds), SSHTAB_TAIL (a line count, or empty for "only new
 # output"), SSHTAB_FORCE (1 or empty). Optional: SSHTAB_KEEP_HEAD and SSHTAB_KEEP_TAIL,
 # the bytes kept from each end of an output stream that is too long.
-# Window files: DESIGN.md 5.3. Reply format: sshtab/protocol.py.
+# Window files: DESIGN.md 5.3. Reply format: protocol.go.
 
 sshtab_sessions=~/.sshtab/sessions
 sshtab_dir=$sshtab_sessions/${SSHTAB_WINDOW-}

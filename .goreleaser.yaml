@@ -1,0 +1,25 @@
+# Releases: push a tag like v0.1.0 and .github/workflows/release.yml runs this.
+version: 2
+project_name: sshtab
+
+builds:
+  - env: [CGO_ENABLED=0]
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    ldflags: ["-s -w -X main.version={{ .Version }}"]
+
+archives:
+  - formats: [tar.gz]
+    # No version in the name, so install.sh can always fetch
+    # releases/latest/download/sshtab_<os>_<arch>.tar.gz.
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - README.zh-CN.md
+      - skills/sshtab/SKILL.md
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
