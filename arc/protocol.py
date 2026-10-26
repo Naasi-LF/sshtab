@@ -1,12 +1,13 @@
 """Wire format between arc and the remote driver (arc/driver.sh).
 
-arc sends the driver on ssh's stdin, with the user's command prepended as
-base64 so it never needs quoting. The driver answers with one header line
-followed by the raw stdout and stderr bytes:
+arc sends the driver on ssh's stdin, with its parameters prepended as shell
+assignments; the user's command is base64 so it never needs quoting. The
+driver answers with one header line followed by raw stdout and stderr bytes:
 
-    ARC1 status=exit code=2 cwd=<base64> out=<n bytes> err=<n bytes>\\n<stdout><stderr>
+    ARC1 status=running code=0 cwd=<base64> elapsed=31 cmd=<base64> out=<n bytes> err=<n bytes>\\n<stdout><stderr>
 
-The streams are delimited by their lengths, not by markers, so any output is safe.
+status is exit, running, stopped, idle or busy. The streams are delimited by
+their lengths, not by markers, so any output is safe.
 """
 
 from __future__ import annotations
@@ -29,13 +30,20 @@ class Result:
     cwd: str
     stdout: str
     stderr: str
+    elapsed: int = 0  # seconds since the window's last command started
+    cmd: str = ""  # first line of that command
 
 
-def build_script(command: str, window: str) -> str:
-    """`window` must already be validated (cli.WINDOW_RE): it is pasted into bash."""
-    encoded = base64.b64encode(command.encode()).decode()
+def build_script(action: str, window: str, **params: str | int) -> str:
+    """Values are pasted into bash unquoted: only validated names, numbers and base64."""
+    lines = [f"ARC_ACTION={action}", f"ARC_WINDOW={window}"]
+    lines += [f"ARC_{key.upper()}={value}" for key, value in params.items()]
     driver = resources.files("arc").joinpath("driver.sh").read_text()
-    return f"ARC_CMD_B64={encoded}\nARC_WINDOW={window}\n{driver}"
+    return "\n".join(lines) + "\n" + driver
+
+
+def encode_command(command: str) -> str:
+    return base64.b64encode(command.encode()).decode()
 
 
 def parse(raw: bytes) -> Result:
@@ -56,15 +64,21 @@ def parse(raw: bytes) -> Result:
         result = Result(
             status=fields["status"],
             code=int(fields["code"]),
-            cwd=base64.b64decode(fields["cwd"]).decode(errors="replace"),
+            cwd=_unb64(fields["cwd"]),
             stdout=_text(body[:out_len]),
             stderr=_text(body[out_len:out_len + err_len]),
+            elapsed=int(fields.get("elapsed", 0)),
+            cmd=_unb64(fields.get("cmd", "")),
         )
     except (KeyError, ValueError) as exc:
         raise ProtocolError(f"bad header {header!r}: {exc}") from exc
     if len(body) < out_len + err_len:
         raise ProtocolError("response ended early")
     return result
+
+
+def _unb64(value: str) -> str:
+    return _text(base64.b64decode(value))
 
 
 def _text(data: bytes) -> str:

@@ -70,7 +70,7 @@ class RunTest(unittest.TestCase):
 
 
 @unittest.skipUnless(host_reachable(), f"{HOST} is not reachable over ssh")
-class WindowStateTest(unittest.TestCase):
+class WindowTestCase(unittest.TestCase):
     """Each test gets fresh, uniquely named windows that are deleted afterwards."""
 
     def setUp(self):
@@ -98,6 +98,20 @@ class WindowStateTest(unittest.TestCase):
         header, *lines = proc.stdout.splitlines()
         return header, lines
 
+    def wait_until_done(self, target: str, timeout: float = 15) -> list:
+        """Polls `arc log` until the command finishes; returns every log reply."""
+        replies = []
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            proc = arc("log", target)
+            replies.append(proc)
+            if proc.returncode != 75:
+                return replies
+            time.sleep(0.3)
+        self.fail(f"{target} still running after {timeout}s")
+
+
+class WindowStateTest(WindowTestCase):
     def test_window_name_shows_in_header(self):
         w = self.window()
         self.assertEqual(self.run_in(w, "true")[0], f"[exit 0 · {w} · {self.run_in(w, 'pwd')[1][0]}]")
@@ -175,6 +189,81 @@ class WindowStateTest(unittest.TestCase):
         self.assertNotIn(venv, lines[1])
 
 
+class LongCommandTest(WindowTestCase):
+    def test_returns_after_wait_and_keeps_running(self):
+        w = self.window()
+        start = time.monotonic()
+        proc = arc("run", w, "echo started; sleep 3; echo finished", "--wait", "1")
+        self.assertLess(time.monotonic() - start, 2.5)
+        self.assertEqual(proc.returncode, 75)
+        header, *lines = proc.stdout.splitlines()
+        self.assertRegex(header, rf"^\[running \ds · {w} · .+\]$")
+        self.assertEqual(lines, ["started", f"hint: still running. `arc log {w}` to check"])
+
+        final = self.wait_until_done(w)[-1]
+        self.assertEqual(final.returncode, 0)
+        self.assertEqual(final.stdout.splitlines()[1:], ["finished"])
+
+    def test_log_shows_only_new_output(self):
+        w = self.window()
+        # Output already in run's own reply counts as seen, so count across all replies.
+        replies = [arc("run", w, "echo a; sleep 1.5; echo b >&2", "--wait", "0")]
+        replies += self.wait_until_done(w)
+        seen = "".join(r.stdout.split("\n", 1)[1] for r in replies)
+        self.assertEqual(seen.count("a\n"), 1)
+        self.assertEqual(seen.count("--- stderr ---\nb\n"), 1)
+        self.assertEqual(arc("log", w).stdout.splitlines()[1:], ["(no new output)"])
+
+    def test_log_tail_shows_last_lines_again(self):
+        w = self.window()
+        self.run_in(w, "seq 1 100")
+        self.assertEqual(arc("log", w, "--tail", "3").stdout.splitlines()[1:], ["98", "99", "100"])
+        self.assertEqual(arc("log", w, "--tail", "1").stdout.splitlines()[1:], ["100"])
+
+    def test_busy_window_refuses_new_commands(self):
+        w = self.window()
+        arc("run", w, "sleep 2", "--wait", "0")
+        proc = arc("run", w, "echo should-not-run")
+        self.assertEqual(proc.returncode, 255)
+        self.assertIn(f"{w} is busy (sleep 2,", proc.stderr)
+        self.assertIn("use another window", proc.stderr)
+        self.wait_until_done(w)
+        self.assertEqual(self.run_in(w, "echo free")[1], ["free"])
+
+    def test_wait_zero_returns_at_once_and_survives_disconnect(self):
+        w = self.window()
+        start = time.monotonic()
+        self.assertEqual(arc("run", w, "sleep 1; echo survived", "--wait", "0").returncode, 75)
+        self.assertLess(time.monotonic() - start, 1)
+        self.assertIn("survived", self.wait_until_done(w)[-1].stdout)
+
+    def test_state_is_saved_when_a_detached_command_finishes(self):
+        w = self.window()
+        arc("run", w, "sleep 1; cd /tmp; export DONE=yes", "--wait", "0")
+        self.wait_until_done(w)
+        self.assertEqual(self.run_in(w, "pwd; echo $DONE")[1], ["/tmp", "yes"])
+
+    def test_quick_commands_return_quickly(self):
+        w = self.window()
+        self.run_in(w, "true")
+        start = time.monotonic()
+        self.run_in(w, "true")
+        self.assertLess(time.monotonic() - start, 1)
+
+    def test_log_on_unused_window_does_not_create_it(self):
+        name = f"t-{uuid.uuid4().hex[:8]}"
+        proc = arc("log", f"{HOST}/{name}")
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(proc.stdout.splitlines()[1:], ["(no new output)"])
+        self.assertIn("[idle ·", proc.stdout)
+        exists = subprocess.run(["ssh", HOST, f"test -e ~/.arc/sessions/{name}"])
+        self.assertNotEqual(exists.returncode, 0)
+
+    def test_progress_bars_show_last_redraw(self):
+        w = self.window()
+        self.assertEqual(self.run_in(w, r"printf '10%%\r50%%\r100%%\n'")[1], ["100%"])
+
+
 class ErrorTest(unittest.TestCase):
     def test_bad_window_name(self):
         proc = arc("run", "pdvm/bad name", "true")
@@ -183,6 +272,11 @@ class ErrorTest(unittest.TestCase):
 
     def test_missing_arguments(self):
         self.assertEqual(arc("run", "pdvm").returncode, 255)
+
+    def test_bad_wait(self):
+        proc = arc("run", "pdvm", "true", "--wait", "soon")
+        self.assertEqual(proc.returncode, 255)
+        self.assertIn("invalid duration", proc.stderr)
 
     def test_unknown_host(self):
         proc = arc("run", "no-such-host.invalid", "true")

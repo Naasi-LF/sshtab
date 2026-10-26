@@ -3,13 +3,20 @@
 import base64
 import unittest
 
+import argparse
+
 from arc import output, protocol
-from arc.cli import Target, parse_target
+from arc.cli import Target, parse_duration, parse_target
 
 
-def reply(out: bytes = b"", err: bytes = b"", code: int = 0, cwd: str = "/home/u") -> bytes:
-    cwd64 = base64.b64encode(cwd.encode()).decode()
-    head = f"ARC1 status=exit code={code} cwd={cwd64} out={len(out)} err={len(err)}\n"
+def b64(text: str) -> str:
+    return base64.b64encode(text.encode()).decode()
+
+
+def reply(out: bytes = b"", err: bytes = b"", code: int = 0, cwd: str = "/home/u",
+          status: str = "exit", elapsed: int = 0, cmd: str = "") -> bytes:
+    head = (f"ARC1 status={status} code={code} cwd={b64(cwd)} elapsed={elapsed} "
+            f"cmd={b64(cmd)} out={len(out)} err={len(err)}\n")
     return head.encode() + out + err
 
 
@@ -27,6 +34,23 @@ class ParseTargetTest(unittest.TestCase):
                 parse_target(bad)
 
 
+class DurationTest(unittest.TestCase):
+    def test_parse(self):
+        for text, seconds in [("0", 0), ("30", 30), ("30s", 30), ("5m", 300), ("2h", 7200)]:
+            with self.subTest(text=text):
+                self.assertEqual(parse_duration(text), seconds)
+
+    def test_parse_rejects(self):
+        for bad in ["", "-1", "1.5", "5 m", "5d", "m"]:
+            with self.subTest(bad=bad), self.assertRaises(argparse.ArgumentTypeError):
+                parse_duration(bad)
+
+    def test_format(self):
+        for seconds, text in [(0, "0s"), (59, "59s"), (60, "1m00s"), (725, "12m05s"), (3900, "1h05m")]:
+            with self.subTest(seconds=seconds):
+                self.assertEqual(output.duration(seconds), text)
+
+
 class ProtocolTest(unittest.TestCase):
     def test_round_trip(self):
         result = protocol.parse(reply(b"hi\n", b"oops\n", code=2, cwd="/data/项目"))
@@ -34,6 +58,10 @@ class ProtocolTest(unittest.TestCase):
             (result.status, result.code, result.cwd, result.stdout, result.stderr),
             ("exit", 2, "/data/项目", "hi\n", "oops\n"),
         )
+
+    def test_running_fields(self):
+        result = protocol.parse(reply(b"epoch 1\n", status="running", elapsed=31, cmd="python train.py"))
+        self.assertEqual((result.status, result.elapsed, result.cmd), ("running", 31, "python train.py"))
 
     def test_output_that_looks_like_a_header_is_just_output(self):
         fake = b"ARC1 status=exit code=0 cwd= out=0 err=0\n"
@@ -53,12 +81,13 @@ class ProtocolTest(unittest.TestCase):
             with self.subTest(raw=raw), self.assertRaises(protocol.ProtocolError):
                 protocol.parse(raw)
 
-    def test_build_script_encodes_command(self):
-        script = protocol.build_script("echo \"it's\" $HOME", "train")
-        first, second = script.splitlines()[:2]
-        self.assertEqual(base64.b64decode(first.split("=", 1)[1]).decode(), "echo \"it's\" $HOME")
-        self.assertEqual(second, "ARC_WINDOW=train")
-        self.assertIn("ARC1 status=exit", script)
+    def test_build_script(self):
+        command = "echo \"it's\" $HOME"
+        script = protocol.build_script("run", "train", cmd_b64=protocol.encode_command(command), wait=30)
+        self.assertEqual(script.splitlines()[:4], [
+            "ARC_ACTION=run", "ARC_WINDOW=train", f"ARC_CMD_B64={b64(command)}", "ARC_WAIT=30",
+        ])
+        self.assertIn("ARC1 status=", script)
 
 
 class RenderTest(unittest.TestCase):
@@ -72,6 +101,22 @@ class RenderTest(unittest.TestCase):
     def test_no_output(self):
         result = protocol.Result("exit", 0, "/home/u", "", "")
         self.assertEqual(output.render(result, "pdvm/main"), "[exit 0 · pdvm/main · /home/u]\n")
+        self.assertEqual(
+            output.render(result, "pdvm/main", empty_note="(no new output)"),
+            "[exit 0 · pdvm/main · /home/u]\n(no new output)\n",
+        )
+
+    def test_running_has_hint(self):
+        result = protocol.Result("running", 0, "/data", "epoch 1\n", "", elapsed=95)
+        self.assertEqual(
+            output.render(result, "pdvm/train"),
+            "[running 1m35s · pdvm/train · /data]\nepoch 1\n"
+            "hint: still running. `arc log pdvm/train` to check\n",
+        )
+
+    def test_carriage_returns_show_last_redraw(self):
+        result = protocol.Result("exit", 0, "/", "", " 10%|#  \r 50%|### \r100%|####\nok\r\n")
+        self.assertIn("--- stderr ---\n100%|####\nok\n", output.render(result, "h/main"))
 
 
 if __name__ == "__main__":
