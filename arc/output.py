@@ -37,6 +37,13 @@ def render(result: Result, target: str, empty_note: str = "") -> str:
         parts.append(_with_newline(stderr))
     if not stdout and not stderr and empty_note:
         parts.append(empty_note + "\n")
+    if result.truncated:
+        window = target.split("/", 1)[1]
+        files = " and ".join(f"~/.arc/sessions/{window}/{name}" for name in result.truncated)
+        parts.append(
+            f"hint: output truncated. In full: {files} on the server, "
+            "until this window runs another command\n"
+        )
     if result.status == "running":
         parts.append(f"hint: still running. `arc log {target}` to check, `arc kill {target}` to stop\n")
     return "".join(parts)

@@ -4,6 +4,7 @@ Skipped when the host is unreachable.
 """
 
 import os
+import re
 import subprocess
 import sys
 import time
@@ -264,6 +265,57 @@ class LongCommandTest(WindowTestCase):
     def test_progress_bars_show_last_redraw(self):
         w = self.window()
         self.assertEqual(self.run_in(w, r"printf '10%%\r50%%\r100%%\n'")[1], ["100%"])
+
+
+class TruncationTest(WindowTestCase):
+    MARKER = re.compile(r"^\.\.\. \[[\d.]+ (?:bytes|KB|MB) omitted, ([\d,]+) lines\] \.\.\.$")
+
+    def test_huge_output_is_cut_on_the_server(self):
+        w = self.window()
+        start = time.monotonic()
+        proc = arc("run", w, "seq 1 10000000")  # 75 MB
+        self.assertLess(time.monotonic() - start, 5)
+        self.assertEqual(proc.returncode, 0)
+        self.assertLess(len(proc.stdout), 40_000)
+        _, *lines = proc.stdout.splitlines()
+        self.assertEqual(lines[-1], f"hint: output truncated. In full: ~/.arc/sessions/{w.split('/')[1]}"
+                                    "/stdout on the server, until this window runs another command")
+        shown = lines[:-1]
+        [marker_at] = [i for i, line in enumerate(shown) if self.MARKER.match(line)]
+        head, tail = shown[:marker_at], shown[marker_at + 1:]
+        omitted = int(self.MARKER.match(shown[marker_at]).group(1).replace(",", ""))
+        # Whole lines only, and nothing lost: the counts add up to all 10M lines.
+        self.assertEqual(head[:2], ["1", "2"])
+        self.assertEqual(tail[-1], "10000000")
+        self.assertEqual(int(head[-1]) + 1 + omitted, int(tail[0]))
+        self.assertEqual(len(head) + omitted + len(tail), 10_000_000)
+
+    def test_full_output_stays_on_the_server(self):
+        w = self.window()
+        arc("run", w, "seq 1 100000")
+        path = f"~/.arc/sessions/{w.split('/')[1]}/stdout"
+        _, lines = self.run_in(self.window(), f"sed -n 50000p {path}; wc -l < {path}")
+        self.assertEqual(lines, ["50000", "100000"])
+
+    def test_streams_are_cut_independently(self):
+        w = self.window()
+        proc = arc("run", w, "echo small; seq 1 100000 >&2")
+        out, err = proc.stdout.split("--- stderr ---\n")
+        self.assertEqual(out.splitlines()[1:], ["small"])
+        self.assertTrue(any(self.MARKER.match(line) for line in err.splitlines()))
+        self.assertIn("/stderr on the server", err)
+
+    def test_log_tail_is_cut_too(self):
+        w = self.window()
+        arc("run", w, "seq 1 100000")
+        lines = arc("log", w, "--tail", "50000").stdout.splitlines()
+        self.assertEqual(lines[1], "50001")
+        self.assertTrue(any(self.MARKER.match(line) for line in lines))
+
+    def test_output_under_the_limit_is_untouched(self):
+        w = self.window()
+        proc = arc("run", w, "seq 1 5000")  # 24 KB
+        self.assertEqual(proc.stdout.splitlines()[1:], [str(i) for i in range(1, 5001)])
 
 
 def remote_processes(pattern: str) -> list:

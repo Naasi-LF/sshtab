@@ -14,9 +14,11 @@ def b64(text: str) -> str:
 
 
 def reply(out: bytes = b"", err: bytes = b"", code: int = 0, cwd: str = "/home/u",
-          status: str = "exit", elapsed: int = 0, cmd: str = "") -> bytes:
+          status: str = "exit", elapsed: int = 0, cmd: str = "",
+          out_cut: str = "", err_cut: str = "") -> bytes:
     head = (f"ARC1 status={status} code={code} cwd={b64(cwd)} elapsed={elapsed} "
-            f"cmd={b64(cmd)} out={len(out)} err={len(err)}\n")
+            f"cmd={b64(cmd)} signal= out_cut={out_cut} err_cut={err_cut} "
+            f"out={len(out)} err={len(err)}\n")
     return head.encode() + out + err
 
 
@@ -88,6 +90,40 @@ class ProtocolTest(unittest.TestCase):
             "ARC_ACTION=run", "ARC_WINDOW=train", f"ARC_CMD_B64={b64(command)}", "ARC_WAIT=30",
         ])
         self.assertIn("ARC1 status=", script)
+
+
+class TruncationTest(unittest.TestCase):
+    def test_cuts_move_to_line_breaks(self):
+        # Driver kept 9 head bytes and 9 tail bytes of "line1\nline2\n<middle>\nline8\nline9\n".
+        head, tail = b"line1\nlin", b"e8\nline9\n"
+        result = protocol.parse(reply(head + tail, out_cut=f"{len(head)}:2000:300"))
+        self.assertEqual(result.stdout, "line1\n... [2.0 KB omitted, 301 lines] ...\nline9\n")
+        self.assertEqual(result.truncated, ("stdout",))
+
+    def test_progress_bar_cut_at_carriage_return(self):
+        head, tail = b" 1%|#\r 2%|#", b"#\r99%|####\r100%|#####\ndone\n"
+        result = protocol.parse(reply(err=head + tail, err_cut=f"{len(head)}:6291456:0"))
+        rendered = output.render(result, "pdvm/train")
+        self.assertIn("... [6.0 MB omitted] ...\n100%|#####\ndone\n", rendered)
+        self.assertEqual(result.truncated, ("stderr",))
+
+    def test_single_huge_line_is_cut_where_it_is(self):
+        head, tail = b"x" * 10, b"y" * 20
+        result = protocol.parse(reply(head + tail, out_cut="10:5:0"))
+        self.assertEqual(result.stdout, "x" * 10 + "\n... [5 bytes omitted] ...\n" + "y" * 20)
+
+    def test_hint_names_the_full_output_files(self):
+        result = protocol.Result("exit", 0, "/", "a", "b", truncated=("stdout", "stderr"))
+        self.assertIn(
+            "hint: output truncated. In full: ~/.arc/sessions/train/stdout and "
+            "~/.arc/sessions/train/stderr on the server",
+            output.render(result, "pdvm/train"),
+        )
+
+    def test_sizes(self):
+        for n, text in [(5, "5 bytes"), (2048, "2.0 KB"), (78_888_888, "75.2 MB"), (3 * 1024 ** 3, "3.0 GB")]:
+            with self.subTest(n=n):
+                self.assertEqual(protocol._size(n), text)
 
 
 class RenderTest(unittest.TestCase):

@@ -2,7 +2,8 @@
 # arc prepends ARC_ACTION (run, log, kill, list or close), ARC_WINDOW (except
 # for list) and, depending on the action: ARC_CMD_B64 (the user's command,
 # base64), ARC_WAIT (seconds), ARC_TAIL (a line count, or empty for "only new
-# output"), ARC_FORCE (1 or empty).
+# output"), ARC_FORCE (1 or empty). Optional: ARC_KEEP_HEAD and ARC_KEEP_TAIL,
+# the bytes kept from each end of an output stream that is too long.
 # Window files: DESIGN.md 5.3. Reply format: arc/protocol.py.
 
 arc_sessions=~/.arc/sessions
@@ -11,7 +12,8 @@ arc_tmp=$(mktemp -d) || exit 1
 trap 'rm -rf "$arc_tmp"' EXIT
 : >"$arc_tmp/stdout"
 : >"$arc_tmp/stderr"
-arc_signal=
+: "${ARC_KEEP_HEAD:=10240}" "${ARC_KEEP_TAIL:=20480}"
+arc_signal= arc_cut_stdout= arc_cut_stderr=
 
 # The window's shell: restore its saved state, run the command, save the new state.
 # The state is cwd, every shell variable (exported or not) and every function.
@@ -111,6 +113,29 @@ arc_inspect() {
   fi
 }
 
+# Appends bytes [$2, $2 + $3) of file $1 to file $4.
+arc_slice() { tail -c +"$(($2 + 1))" "$1" | head -c "$3" >>"$4"; }
+
+# Writes bytes [$2, $3) of file $1 to $arc_tmp/$4 (stdout or stderr). If there
+# are too many, keeps only the first ARC_KEEP_HEAD and last ARC_KEEP_TAIL bytes
+# and sets arc_cut_$4 to "<head bytes>:<omitted bytes>:<omitted newlines>".
+# Cutting here, on the server, means huge output never crosses the network.
+arc_emit() {
+  local src=$1 start=$2 end=$3 name=$4 omitted lines
+  local dest=$arc_tmp/$name
+  : >"$dest"
+  printf -v "arc_cut_$name" '%s' ''
+  if [ $((end - start)) -le $((ARC_KEEP_HEAD + ARC_KEEP_TAIL)) ]; then
+    arc_slice "$src" "$start" $((end - start)) "$dest"
+    return
+  fi
+  omitted=$((end - start - ARC_KEEP_HEAD - ARC_KEEP_TAIL))
+  arc_slice "$src" "$start" "$ARC_KEEP_HEAD" "$dest"
+  arc_slice "$src" $((end - ARC_KEEP_TAIL)) "$ARC_KEEP_TAIL" "$dest"
+  lines=$(tail -c +"$((start + ARC_KEEP_HEAD + 1))" "$src" | head -c "$omitted" | wc -l)
+  printf -v "arc_cut_$name" '%s:%s:%s' "$ARC_KEEP_HEAD" "$omitted" "$lines"
+}
+
 # Collects into $arc_tmp the stdout and stderr the agent has not seen yet (or
 # their last ARC_TAIL lines), and remembers how far the agent has now read.
 arc_collect() {
@@ -123,11 +148,12 @@ arc_collect() {
     # Measure first: the command may still be writing.
     size=$(wc -c <"$src")
     if [ -n "${ARC_TAIL-}" ]; then
-      head -c "$size" "$src" | tail -n "$ARC_TAIL" >"$arc_tmp/$name"
+      head -c "$size" "$src" | tail -n "$ARC_TAIL" >"$arc_tmp/$name.tail"
+      arc_emit "$arc_tmp/$name.tail" 0 "$(wc -c <"$arc_tmp/$name.tail")" "$name"
     else
       if [ "$name" = stdout ]; then off=$out_off; else off=$err_off; fi
       [ "$off" -le "$size" ] || off=0
-      tail -c +"$((off + 1))" "$src" | head -c "$((size - off))" >"$arc_tmp/$name"
+      arc_emit "$src" "$off" "$size" "$name"
     fi
     if [ "$name" = stdout ]; then out_off=$size; else err_off=$size; fi
   done
@@ -139,9 +165,10 @@ arc_b64() { printf '%s' "$1" | base64 -w0; }
 # Prints the reply: a header with status $1 and the values from arc_inspect,
 # then whatever stdout and stderr were collected into $arc_tmp.
 arc_reply() {
-  printf 'ARC1 status=%s code=%d cwd=%s elapsed=%d cmd=%s signal=%s out=%d err=%d\n' \
+  printf 'ARC1 status=%s code=%d cwd=%s elapsed=%d cmd=%s signal=%s out_cut=%s err_cut=%s out=%d err=%d\n' \
     "$1" "$arc_code" "$(arc_b64 "$arc_cwd")" "$arc_elapsed" "$(arc_b64 "$arc_cmdline")" \
-    "$arc_signal" "$(wc -c <"$arc_tmp/stdout")" "$(wc -c <"$arc_tmp/stderr")"
+    "$arc_signal" "$arc_cut_stdout" "$arc_cut_stderr" \
+    "$(wc -c <"$arc_tmp/stdout")" "$(wc -c <"$arc_tmp/stderr")"
   cat "$arc_tmp/stdout" "$arc_tmp/stderr"
 }
 
