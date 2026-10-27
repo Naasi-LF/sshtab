@@ -290,6 +290,15 @@ func TestE2ENewWindowStartsAtHome(t *testing.T) {
 	assertEqual(t, pwd, home)
 }
 
+// A plain `ssh host cmd` skips the login profiles, where hosts like AutoDL put
+// conda and CUDA on PATH. A new window must see the PATH a login shell sees.
+func TestE2ENewWindowReadsLoginProfiles(t *testing.T) {
+	e := newE2E(t)
+	login := onServer(t, `bash -l -c 'printf "%s\n" "$PATH"' </dev/null 2>/dev/null`)
+	_, lines := e.runIn(e.window(), `printf "%s\n" "$PATH"`)
+	assertEqual(t, lines, []string{strings.TrimSpace(login)})
+}
+
 func TestE2EVariablesAndFunctionsAreRemembered(t *testing.T) {
 	e := newE2E(t)
 	w := e.window()

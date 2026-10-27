@@ -18,7 +18,7 @@ type sshReply struct {
 
 func sshArgs(host, controlDir, remoteCommand string) []string {
 	return []string{
-		// Reuse one connection per host: ~20ms per command instead of a full handshake.
+		// Reuse one connection per host: no full handshake per command.
 		"-o", "ControlMaster=auto",
 		"-o", "ControlPath=" + controlDir + "/%C",
 		"-o", "ControlPersist=10m",

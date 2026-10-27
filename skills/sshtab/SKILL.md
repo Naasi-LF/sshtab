@@ -48,7 +48,7 @@ stdout comes first, then stderr after `--- stderr ---`; they are not interleaved
 
 - The directory, every shell variable (exported or not), `unset`s and shell functions persist, so `source .venv/bin/activate`, `export CUDA_VISIBLE_DEVICES=1` and `cd` work as in a terminal. Do them once per window, not before every command.
 - Windows are independent. Use one per job: e.g. `gpu1/train` for the training run, `gpu1/main` for looking around, `gpu1/tb` for TensorBoard.
-- A new window starts in the home directory with a fresh login environment.
+- A new window starts in the home directory with a fresh login environment: it reads `/etc/profile` and `~/.profile` (or `~/.bash_profile`) like `ssh host` does, so conda, CUDA and module paths the server sets there are on `PATH`.
 - Not remembered: aliases, `set -e`-style shell options, and anything from a command that had to be SIGKILLed.
 
 ## Long commands

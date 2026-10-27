@@ -28,6 +28,17 @@ export -n __sshtab_dir
 if [ -f "$__sshtab_dir/vars.sh" ]; then
   . "$__sshtab_dir/vars.sh" 2>/dev/null
   . "$__sshtab_dir/funcs.sh" 2>/dev/null
+else
+  # A new window: read the profiles a login shell reads, in bash's order, so
+  # PATH has what `ssh host` gives you (conda, CUDA, modules). ssh host cmd
+  # skips them. Their output is noise here, and stdin is already /dev/null.
+  {
+    [ -r /etc/profile ] && . /etc/profile
+    for __sshtab_p in ~/.bash_profile ~/.bash_login ~/.profile; do
+      [ -r "$__sshtab_p" ] && { . "$__sshtab_p"; break; }
+    done
+  } >/dev/null 2>&1
+  unset __sshtab_p
 fi
 # Keep commands non-interactive and their output unbuffered.
 export PAGER=cat GIT_PAGER=cat TERM=dumb DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1

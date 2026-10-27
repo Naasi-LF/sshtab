@@ -39,7 +39,7 @@ The loss was blowing up, so the agent hit Ctrl-C. The window still remembers the
 | Pagers, prompts and `read` hang forever | stdin is `/dev/null`, pagers are off: nothing can wait for input |
 | One `cat` of a log can flood the agent's context | Output over 30KB is cut **on the server** to its head and tail |
 | Nested quotes are easy to get wrong | Commands are sent encoded: quote once, as in your own terminal |
-| A new connection per command | One reused connection: about 0.1s per command |
+| A new connection per command | One reused connection, no handshake per command: about 0.05s on a nearby server, otherwise mostly the network's latency |
 | `scp`/`rsync` paths start from the home directory, not where you `cd`'d | `push`/`pull` paths start from the window's directory, over the same connection |
 
 ## Install
@@ -75,6 +75,8 @@ sshtab pull     host[/window] path... [--to DIR]       copy files from the windo
 ### Windows
 
 A window is a terminal tab on the server. Each one keeps its own working directory, shell variables (exported or not), functions and `unset`s, so activating a venv or exporting `CUDA_VISIBLE_DEVICES` works once and stays. Use one window per job, like tabs: `gpu1/train` for training, `gpu1/main` for looking around.
+
+A new window starts in your home directory with the environment of a login shell: it reads `/etc/profile` and `~/.profile` (or `~/.bash_profile`), which plain `ssh host cmd` skips. So if `python3` or `nvcc` works after `ssh host`, it works in a new window too, e.g. on GPU hosts that set up conda and CUDA there.
 
 A window runs one command at a time. A busy window refuses new commands and suggests another window.
 

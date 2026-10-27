@@ -19,7 +19,7 @@
 | 命令偷偷等待输入（翻页器、确认提示），一直卡死 | 关闭 stdin，强制非交互环境 |
 | 一次输出几十 MB，撑爆 Agent 的上下文 | 输出自动截断 |
 | 引号嵌套很容易写错 | 命令经过编码后传输，不需要转义 |
-| 每次都重新建立连接，比较慢 | 复用 SSH 连接（每条命令约 20ms） |
+| 每次都重新建立连接，比较慢 | 复用 SSH 连接（近处的服务器每条命令约 0.05 秒，远的主要取决于网络延迟） |
 
 ### v0.1 不做的事
 
@@ -33,7 +33,7 @@
 
 - 每个窗口有自己的**当前目录**和**环境变量**
 - 窗口写成 `主机/窗口名`，例如 `pdvm/train`；只写 `pdvm` 等于 `pdvm/main`
-- 第一次使用某个窗口名时自动新建；新窗口从家目录开始
+- 第一次使用某个窗口名时自动新建；新窗口从家目录开始，并像登录 shell 一样读取 `/etc/profile` 和 `~/.profile`（见 5.3）
 - 窗口一直存在，直到 `close` 为止（服务器重启后也还在）
 - 一个窗口同一时间只能跑一条命令；正在跑的窗口是"忙碌"的，就像真终端一样
 - 长命令不需要"后台"的概念：没跑完的命令就留在它的窗口里继续跑
@@ -313,7 +313,7 @@ hint: output truncated. In full: ~/.sshtab/sessions/main/stdout on the server, u
 
    窗口的 shell 里依次执行：
    ```sh
-   . vars.sh; . funcs.sh                    # 恢复变量和函数
+   . vars.sh; . funcs.sh                    # 恢复变量和函数；新窗口改为读取登录 profile
    export PAGER=cat ...                     # 强制非交互设置（见 5.7）
    cd "$(<cwd)"                             # 恢复目录；目录被删了就回到家目录并提示
    trap '保存 cwd、vars.sh、funcs.sh' EXIT
@@ -321,7 +321,7 @@ hint: output truncated. In full: ~/.sshtab/sessions/main/stdout on the server, u
    eval "$用户命令"                          # 执行
    ```
    - 用 `trap EXIT` 来保存状态，这样即使用户命令里写了 `exit 3`，状态也会保存。写入退出码的步骤也放在这里。
-   - 窗口一旦有了保存的状态，就用 `env -i` 从空环境启动、完全靠 `vars.sh` 恢复，这样被 `unset` 的变量不会因为 ssh 登录环境里有它而又冒出来。新窗口则继承 ssh 的登录环境。
+   - 窗口一旦有了保存的状态，就用 `env -i` 从空环境启动、完全靠 `vars.sh` 恢复，这样被 `unset` 的变量不会因为 ssh 登录环境里有它而又冒出来。新窗口则继承 ssh 的环境，再按 bash 登录 shell 的顺序读取 `/etc/profile` 和 `~/.bash_profile`、`~/.bash_login`、`~/.profile` 中第一个存在的文件。`ssh host cmd` 不读这些文件，而很多 GPU 服务器（比如 AutoDL）的 conda、CUDA 路径就写在 `/etc/profile` 里。这些文件的输出全部丢弃；只在新窗口的第一条命令读一次，之后靠 `vars.sh` 保存和恢复。
    - sshtab 自己用到的变量都以 `__sshtab_` 开头，保存时跳过；bash 内部的变量（`PPID`、`RANDOM`、`SHLVL` 等）和每次连接都会变的 `SSH_*` 也跳过。
    - 用户命令写在临时文件里传给窗口的 shell，而不是放在环境变量里，因为单个环境变量同样有约 128KB 的长度限制。
 5. **解锁**，然后**等待**：每 20 毫秒检查一次是否已经有 `exit` 文件、进程是否还活着，最多等 `--wait` 秒。等待用的是对一个没人写入的 fifo 做 `read -t 0.02`，这是 bash 的内置命令，不需要 fork，所以短命令几乎没有额外延迟。
