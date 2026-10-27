@@ -56,7 +56,7 @@ Hosts are the names in your `~/.ssh/config`, so jump hosts, keys and ports work 
 
 ### Teach your agent
 
-If you use Claude Code (`~/.claude` exists), the installer also installs the sshtab skill to `~/.claude/skills/sshtab/SKILL.md` (skip it with `SSHTAB_NO_SKILL=1`). The skill explains windows, long commands, output limits and how to edit files on the server. Other agents can be given the same file, [skills/sshtab/SKILL.md](skills/sshtab/SKILL.md), as instructions.
+The installer also installs the sshtab skill for the agents it finds: to `~/.claude/skills/sshtab/SKILL.md` if you use Claude Code (`~/.claude` exists), and to `~/.agents/skills/sshtab/SKILL.md` if you use Codex (`~/.codex` exists). Skip it with `SSHTAB_NO_SKILL=1`. The skill explains windows, long commands, output limits and how to edit files on the server. Other agents can be given the same file, [skills/sshtab/SKILL.md](skills/sshtab/SKILL.md), as instructions.
 
 ## Commands
 

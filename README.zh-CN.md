@@ -56,7 +56,7 @@ curl -fsSL https://raw.githubusercontent.com/Naasi-LF/sshtab/main/install.sh | s
 
 ### 教会你的 Agent
 
-如果你用 Claude Code（也就是存在 `~/.claude` 目录），安装脚本会顺便把 sshtab 的 skill 装到 `~/.claude/skills/sshtab/SKILL.md`（不想装可以设置 `SSHTAB_NO_SKILL=1`）。它会告诉 Agent 窗口怎么用、长命令怎么处理、输出上限是多少，以及怎么修改服务器上的文件。其他 Agent 也可以直接把这份 [skills/sshtab/SKILL.md](skills/sshtab/SKILL.md) 当作使用说明。
+安装脚本会顺便给找到的 Agent 装上 sshtab 的 skill：用 Claude Code（存在 `~/.claude` 目录）就装到 `~/.claude/skills/sshtab/SKILL.md`，用 Codex（存在 `~/.codex` 目录）就装到 `~/.agents/skills/sshtab/SKILL.md`。不想装可以设置 `SSHTAB_NO_SKILL=1`。它会告诉 Agent 窗口怎么用、长命令怎么处理、输出上限是多少，以及怎么修改服务器上的文件。其他 Agent 也可以直接把这份 [skills/sshtab/SKILL.md](skills/sshtab/SKILL.md) 当作使用说明。
 
 ## 命令
 

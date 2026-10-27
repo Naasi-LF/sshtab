@@ -3,7 +3,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/Naasi-LF/sshtab/main/install.sh | sh
 #
 # SSHTAB_INSTALL_DIR  where to put the binary (default: ~/.local/bin)
-# SSHTAB_NO_SKILL=1   do not install the Claude Code skill
+# SSHTAB_NO_SKILL=1   do not install the skill for Claude Code / Codex
 # SSHTAB_ARCHIVE_URL  download this archive instead (mirrors, testing)
 set -eu
 
@@ -43,10 +43,17 @@ chmod 755 "$bin_dir/sshtab.new"
 mv -f "$bin_dir/sshtab.new" "$bin_dir/sshtab"
 echo "Installed $("$bin_dir/sshtab" --version) to $bin_dir/sshtab"
 
-if [ -z "${SSHTAB_NO_SKILL-}" ] && [ -d "$HOME/.claude" ] && [ -f "$tmp/skills/sshtab/SKILL.md" ]; then
-  mkdir -p "$HOME/.claude/skills/sshtab"
-  cp "$tmp/skills/sshtab/SKILL.md" "$HOME/.claude/skills/sshtab/SKILL.md"
-  echo "Installed the Claude Code skill to ~/.claude/skills/sshtab/SKILL.md"
+# install_skill <agent> <skills dir under ~>: copy SKILL.md to ~/<dir>/sshtab/.
+install_skill() {
+  mkdir -p "$HOME/$2/sshtab"
+  cp "$tmp/skills/sshtab/SKILL.md" "$HOME/$2/sshtab/SKILL.md"
+  echo "Installed the $1 skill to ~/$2/sshtab/SKILL.md"
+}
+
+if [ -z "${SSHTAB_NO_SKILL-}" ] && [ -f "$tmp/skills/sshtab/SKILL.md" ]; then
+  if [ -d "$HOME/.claude" ]; then install_skill "Claude Code" .claude/skills; fi
+  # Codex reads user skills from ~/.agents/skills, not ~/.codex.
+  if [ -d "$HOME/.codex" ]; then install_skill Codex .agents/skills; fi
 fi
 
 case ":$PATH:" in
